@@ -165,6 +165,20 @@ def load_view(midi_path: Path, sidecar_path: Path | None = None) -> ScoreView:
 
     pan_by_name = {t["name"]: t.get("pan", 0.0) for t in structure.get("tracks", [])}
 
+    def _pan_from_cc(inst) -> float:
+        """Recover pan from CC10 when no sidecar records it.
+
+        Without this, any MIDI we did not write ourselves (every reference piece)
+        is reported to the judges as entirely centre-panned. That is a false claim
+        about the mix, and it costs the reference marks on orchestration and
+        production for a stereo image it actually has.
+        """
+        values = [cc.value for cc in inst.control_changes if cc.number == 10]
+        if not values:
+            return 0.0
+        # 0 is hard left, 64 centre, 127 hard right.
+        return round(values[0] / 127.0 * 2.0 - 1.0, 3)
+
     bars: dict[str, dict[int, list[BarNote]]] = {}
     track_meta: dict[str, dict] = {}
     duration = 0.0
@@ -199,7 +213,7 @@ def load_view(midi_path: Path, sidecar_path: Path | None = None) -> ScoreView:
         track_meta[name] = {
             "program": inst.program,
             "is_drum": inst.is_drum,
-            "pan": pan_by_name.get(name, 0.0),
+            "pan": pan_by_name.get(name, _pan_from_cc(inst)),
             "note_count": len(inst.notes),
             "low": min(pitches) if pitches else None,
             "high": max(pitches) if pitches else None,
@@ -236,7 +250,15 @@ def _fmt_tempo(tempo: TempoMap) -> str:
     of near-identical entries and buries the one fact a judge wants: that the
     tempo moves, by how much, and where.
     """
-    entries = tempo.entries
+    # Community MIDI often carries several tempo events inside one bar (and on
+    # non-zero tracks, which is technically malformed). Left alone that renders as
+    # "79 from bar 82, 80 from bar 82, 81 from bar 82, ..." and buries the one
+    # fact a judge wants in noise it has to pay tokens to read. Last value per bar
+    # wins, matching how bpm_at already resolves it.
+    collapsed: dict[int, float] = {}
+    for bar, bpm in tempo.entries:
+        collapsed[bar] = bpm
+    entries = sorted(collapsed.items())
     if len(entries) == 1:
         return f"{entries[0][1]:.0f}"
 

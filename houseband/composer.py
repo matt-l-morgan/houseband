@@ -158,6 +158,105 @@ def build_system_prompt(
     ]
 
 
+# How often to surface partial progress from a streaming turn. Composer turns run
+# for minutes at xhigh effort, so without this the log is silent for the entire
+# time the model is thinking and writing, which is indistinguishable from a hang.
+PROGRESS_INTERVAL_S = 3.0
+
+
+def _relay_progress(stream, log: EventLog, round: int, team: str, turn: int) -> None:
+    """Consume the stream, emitting throttled progress as the turn unfolds.
+
+    Streaming was originally adopted only to dodge the SDK's non-streaming
+    duration guard, and the incremental visibility it also provides was being
+    discarded. Draining the events here is what turns "six minutes of silence"
+    into a readable account of what the composer is doing.
+
+    Throttled rather than per-delta on purpose: every event is a line in the log
+    and a message to the browser, and a token-by-token feed would swamp both.
+    """
+    import time
+
+    last_emit = 0.0
+    thinking: list[str] = []
+    text: list[str] = []
+    code_chars = 0
+    phase = ""
+
+    def flush(force: bool = False) -> None:
+        nonlocal last_emit
+        now = time.monotonic()
+        if not force and now - last_emit < PROGRESS_INTERVAL_S:
+            return
+        last_emit = now
+        if phase == "thinking" and thinking:
+            body = "".join(thinking).strip()
+            if body:
+                log.emit(
+                    "composer.thinking",
+                    body[-700:],
+                    round=round,
+                    team=team,
+                    turn=turn,
+                    phase="thinking",
+                    partial=True,
+                )
+        elif phase == "code":
+            log.emit(
+                "composer.thinking",
+                f"writing program... {code_chars:,} characters",
+                round=round,
+                team=team,
+                turn=turn,
+                phase="writing_code",
+                code_chars=code_chars,
+                partial=True,
+            )
+        elif phase == "text" and text:
+            body = "".join(text).strip()
+            if body:
+                log.emit(
+                    "composer.thinking",
+                    body[-700:],
+                    round=round,
+                    team=team,
+                    turn=turn,
+                    phase="writing",
+                    partial=True,
+                )
+
+    try:
+        for event in stream:
+            kind = getattr(event, "type", "")
+            if kind == "content_block_start":
+                block_type = getattr(getattr(event, "content_block", None), "type", "")
+                if block_type == "thinking":
+                    phase = "thinking"
+                elif block_type == "tool_use":
+                    phase = "code"
+                elif block_type == "text":
+                    phase = "text"
+                flush(force=True)
+            elif kind == "content_block_delta":
+                delta = getattr(event, "delta", None)
+                delta_type = getattr(delta, "type", "")
+                if delta_type == "thinking_delta":
+                    thinking.append(getattr(delta, "thinking", "") or "")
+                elif delta_type == "text_delta":
+                    text.append(getattr(delta, "text", "") or "")
+                elif delta_type == "input_json_delta":
+                    code_chars += len(getattr(delta, "partial_json", "") or "")
+                flush()
+            elif kind == "content_block_stop":
+                flush(force=True)
+                thinking.clear()
+                text.clear()
+    except Exception:
+        # Progress reporting must never be able to fail a turn. The authoritative
+        # result comes from get_final_message(), which the caller still awaits.
+        pass
+
+
 def _handle_render(
     code: str,
     workdir: Path,
@@ -253,10 +352,15 @@ def compose(
                 model=config.model,
                 max_tokens=cfg.COMPOSER_MAX_TOKENS,
                 output_config={"effort": cfg.COMPOSER_EFFORT},
+                # Summarised reasoning is the point of the live view: the default
+                # is "omitted", which streams thinking blocks with empty text and
+                # leaves the UI with nothing to show for the longest part of a turn.
+                thinking={"type": "adaptive", "display": "summarized"},
                 system=system,
                 tools=[RENDER_TOOL],
                 messages=messages,
             ) as stream:
+                _relay_progress(stream, log, round, team, turn + 1)
                 message = stream.get_final_message()
         except Exception as exc:  # network, rate limit, refusal, anything
             result.error = f"{type(exc).__name__}: {exc}"

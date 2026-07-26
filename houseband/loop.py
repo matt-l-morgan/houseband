@@ -284,14 +284,34 @@ def run(
                     continue
                 candidates.append(candidate)
                 id_to_team[candidate.candidate_id] = result.team
+
+                # Paths are emitted relative to the run directory because that is
+                # exactly what the files endpoint takes, so the UI can build a
+                # link without knowing anything about the host filesystem.
+                def _rel(path: Path | None) -> str | None:
+                    if not path:
+                        return None
+                    try:
+                        return str(Path(path).resolve().relative_to(run_dir.resolve()))
+                    except ValueError:
+                        return str(path)
+
                 log.emit(
                     "artifact.rendered",
                     f"{candidate.candidate_id} artifacts ready",
                     round=round_no,
                     team=result.team,
                     candidate_id=candidate.candidate_id,
-                    piano_roll=str(candidate.piano_roll) if candidate.piano_roll else None,
-                    audio=str(candidate.audio) if candidate.audio else None,
+                    piano_roll=_rel(candidate.piano_roll),
+                    audio=_rel(candidate.audio),
+                    # The MIDI is the actual deliverable: audio is one render of
+                    # it, and anyone wanting to open the result in a DAW needs this.
+                    midi=_rel(candidate.midi_path),
+                    program=_rel(
+                        (round_dir / result.team / "program.py")
+                        if (round_dir / result.team / "program.py").exists()
+                        else None
+                    ),
                 )
 
                 gate = validator.gate(

@@ -23,6 +23,7 @@ recording should beat both. That is the version worth trusting.
 from __future__ import annotations
 
 import argparse
+import json
 import statistics
 import sys
 from pathlib import Path
@@ -86,6 +87,51 @@ def _from_midi(path: Path, candidate_id: str, out_dir: Path, config: cfg.Config)
     )
 
 
+def _reference_health(midi_path: Path) -> list[str]:
+    """Flag transcription artifacts that make a reference unfair to score.
+
+    Community MIDI is usually transcribed for pitch and rhythm and not for
+    performance, so dynamics and stereo placement are frequently absent. A judge
+    reading that file is right to mark down production and groove, but the piece
+    it was transcribed from does not deserve it. Naming the cause here is the
+    difference between "the judges are broken" and "this anchor cannot be scored
+    on dynamics".
+    """
+    import pretty_midi
+
+    notes: list[int] = []
+    pans: list[int] = []
+    try:
+        midi = pretty_midi.PrettyMIDI(str(midi_path))
+    except Exception as exc:
+        return [f"could not re-read the reference to check it: {exc}"]
+
+    for inst in midi.instruments:
+        notes += [n.velocity for n in inst.notes]
+        pans += [cc.value for cc in inst.control_changes if cc.number == 10]
+
+    problems: list[str] = []
+    if notes:
+        spread = max(notes) - min(notes)
+        if spread <= 16:
+            problems.append(
+                f"velocities span only {spread} of 127 (min {min(notes)}, max {max(notes)}): "
+                "this transcription encodes no dynamics, so production and rhythm "
+                "scores for it are not meaningful"
+            )
+    if not pans or len(set(pans)) <= 1:
+        problems.append(
+            "every track is panned to the same position, so orchestration and "
+            "production have no stereo image to reward"
+        )
+    if not problems:
+        problems.append(
+            "no obvious transcription artifact found, so this may be a genuine "
+            "rubric problem rather than a bad anchor"
+        )
+    return problems
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -145,6 +191,21 @@ def main(argv: list[str] | None = None) -> int:
 
     verdicts = run_panel(candidates, brief, criteria_text, config=config, log=log)
 
+    # Persisted because the event log records only a finding *count*, and when
+    # this gate fails the first question is always "what did the judge actually
+    # say". Without this the answer requires re-running the panel.
+    (out_dir / "verdicts.json").write_text(
+        json.dumps(
+            {
+                "model": config.model,
+                "labels": labels,
+                "verdicts": {k: v.model_dump() for k, v in verdicts.items()},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
     # -- report ------------------------------------------------------------
     width = max(len(DIMENSION_TITLES[d]) for d in DIMENSIONS) + 2
     header = "dimension".ljust(width) + "".join(
@@ -199,9 +260,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nreal reference vs competent:      {ref_total:.2f} vs {good_total:.2f}")
         if ref_total <= good_total:
             print(
-                "  WARNING: a hand-written test piece matched or beat a real "
-                "recording. Treat every score from this panel with suspicion."
+                "  A hand-written test piece matched or beat a real recording.\n"
+                "  Before blaming the rubrics, check the reference itself: the two\n"
+                "  usual causes are a transcription that encoded no dynamics, and a\n"
+                "  brief the reference was never written to satisfy."
             )
+            for line in _reference_health(candidates[-1].midi_path):
+                print(f"    - {line}")
 
     ok = not losses and mean_structural >= REQUIRED_STRUCTURAL_GAP
     print()

@@ -127,7 +127,13 @@ _RANGES: dict[range, tuple[int, int]] = {
     range(48, 56): (36, 96),    # ensemble
     range(56, 64): (34, 94),    # brass
     range(64, 72): (44, 94),    # reeds
-    range(72, 80): (60, 103),   # pipes
+    # Pipes covers the whole recorder family, not just soprano. An alto recorder
+    # bottoms out at F3 (53) and a tenor at C3 (48), so a floor of 60 rejected
+    # real, correctly-written parts. Found by running a professional Stairway to
+    # Heaven transcription through this gate: it failed on seven recorder notes
+    # that are entirely idiomatic. A gate that rejects valid music teaches agents
+    # to avoid valid choices, which is worse than letting an odd note through.
+    range(72, 80): (48, 103),   # pipes
     range(80, 88): (24, 108),   # synth lead
     range(88, 96): (24, 108),   # synth pad
     range(96, 128): (21, 108),  # effects and the rest
