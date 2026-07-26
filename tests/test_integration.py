@@ -410,6 +410,124 @@ class TestFullLoop:
         assert "sk-ant" not in text
 
 
+class TestCalibrationReporting:
+    """Guards the branch that only runs when the judges look wrong.
+
+    A real bug lived here: loop.py wrote ``+ calibration.summary`` without the
+    call, so a miscalibrated round raised TypeError and killed the run right
+    after judging. Every existing test missed it because the stub scored every
+    candidate identically, which makes the reference *tie* rather than lose, and
+    a tie is not a breach. The happy path was covered and the alarm path was not.
+    """
+
+    def _verdict(self, candidate_id, team, score, is_reference=False):
+        from houseband.types import DIMENSIONS, ScoredDimension
+
+        return CandidateVerdict(
+            candidate_id=candidate_id,
+            team=team,
+            is_reference=is_reference,
+            dimensions=[
+                ScoredDimension(dimension=d, score=score, rationale="stub")
+                for d in DIMENSIONS
+            ],
+        )
+
+    def test_agent_beating_the_reference_is_reported(self):
+        from houseband.judges import check_calibration
+
+        report = check_calibration(
+            {
+                "c1": self._verdict("c1", "crate", 9),
+                "ref": self._verdict("ref", "reference", 3, is_reference=True),
+            }
+        )
+        assert report.ok is False
+        assert report.breaches
+
+    def test_report_survives_what_the_loop_does_to_it(self):
+        """The exact two operations loop.py performs on the report."""
+        from houseband.judges import check_calibration
+
+        report = check_calibration(
+            {
+                "c1": self._verdict("c1", "crate", 9),
+                "ref": self._verdict("ref", "reference", 3, is_reference=True),
+            }
+        )
+        # Concatenation: this is what raised TypeError in production.
+        message = "JUDGE CALIBRATION SUSPECT: " + report.summary()
+        assert isinstance(message, str)
+        assert len(message) > len("JUDGE CALIBRATION SUSPECT: ")
+        # And it must be JSON-serialisable for the event payload.
+        assert isinstance(report.model_dump(), dict)
+
+    def test_missing_reference_does_not_read_as_a_pass(self):
+        """A check that could not run must not look like a check that passed."""
+        from houseband.judges import check_calibration
+
+        report = check_calibration({"c1": self._verdict("c1", "crate", 7)})
+        assert report.has_reference is False
+        assert report.ok is False
+        assert isinstance(report.summary(), str)
+
+    def test_miscalibrated_round_does_not_kill_the_run(self, isolated, tmp_path):
+        """End to end, with the reference scored below the agents.
+
+        The stub returns a declining score per distinct candidate, and the loop
+        judges the reference last, so the reference comes out lowest and the
+        alarm path actually executes inside a real run.
+        """
+        from houseband import loop
+
+        class DecliningStub(StubClient):
+            def __init__(self):
+                super().__init__()
+                self.messages = _DecliningMessages(self)
+
+        class _DecliningMessages(StubMessages):
+            def __init__(self, owner):
+                super().__init__(owner)
+                self.order: list[str] = []
+
+            def parse(self, **kwargs):
+                fmt = getattr(kwargs.get("output_format"), "__name__", "")
+                if fmt == "DimensionVerdict":
+                    body = str(kwargs.get("messages"))
+                    key = body[:200]
+                    if key not in self.order:
+                        self.order.append(key)
+                    rank = self.order.index(key)
+                    return _Parsed(
+                        DimensionVerdict(
+                            score=max(1, 9 - rank * 3),
+                            rationale="declining stub",
+                            findings=[],
+                        )
+                    )
+                return super().parse(**kwargs)
+
+        _make_reference(isolated, tmp_path)
+        run_dir = loop.run(
+            prompt="test",
+            teams=2,
+            rounds=1,
+            run_id="miscal",
+            config=isolated,
+            client=DecliningStub(),
+            echo=False,
+            max_turns=3,
+        )
+        events = read_events(run_dir / "events.jsonl")
+        kinds = [e.kind for e in events]
+        assert "run.failed" not in kinds, [
+            e.message for e in events if e.kind == "run.failed"
+        ]
+        assert "run.finished" in kinds
+        # And the round still coached, which is what the crash prevented.
+        assert "coach.rule_written" in kinds
+
+
 class TestComposerLoop:
     def test_composer_retries_after_a_rejected_program(self, isolated, tmp_path):
         """A rejected program has to come back as actionable feedback the agent

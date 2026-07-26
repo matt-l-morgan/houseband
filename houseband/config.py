@@ -40,7 +40,13 @@ JUDGE_EFFORT = "high"
 # thinking counts against max_tokens, so composers need real headroom or they
 # truncate mid-program. Composer calls stream for that reason; judge calls stay
 # under the SDK's non-streaming duration guard (which trips around 21k).
-COMPOSER_MAX_TOKENS = 64_000
+#
+# 64k was not enough. At xhigh effort a composer can spend the entire budget
+# reasoning (one drafted a whole program inside its thinking block) and get cut
+# off before emitting the tool call. The loop now retries a truncated turn, but
+# giving it room in the first place is the cheaper fix. Both models support 128k
+# output, so this leaves headroom rather than sitting at the ceiling.
+COMPOSER_MAX_TOKENS = 96_000
 JUDGE_MAX_TOKENS = 16_000
 
 # Judge dimensions that drive the learning loop get sampled repeatedly and the

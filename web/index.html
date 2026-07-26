@@ -228,6 +228,11 @@
         <select id="f-model"></select>
         <div class="hint" id="model-note"></div>
       </div>
+      <div class="wide">
+        <label for="f-budget">Output-token allowance per round</label>
+        <input id="f-budget" type="number" min="20000" max="20000000" step="10000">
+        <div class="hint" id="budget-note"></div>
+      </div>
       <div class="row" style="justify-content:flex-end">
         <button type="submit" class="primary" id="btn-start">Start run</button>
         <button type="button" class="danger" id="btn-cancel" disabled>Cancel</button>
@@ -448,6 +453,18 @@ function pricingFor(modelId) {
 function showModelNote() {
   const chosen = MODELS.find((m) => m.id === el("f-model").value);
   el("model-note").textContent = chosen ? chosen.note : "";
+
+  // Output tokens dominate the bill, so pricing the allowance on output alone is
+  // a close enough worst case to be useful and errs high rather than low.
+  const note = el("budget-note");
+  if (!note) return;
+  const perRound = Number(el("f-budget").value) || 0;
+  const rounds = Number(el("f-rounds").value) || 1;
+  if (!chosen || !perRound) { note.textContent = ""; return; }
+  const worst = (perRound * rounds * chosen.output_per_mtok) / 1e6;
+  note.textContent =
+    `The run halts past ${(perRound * rounds).toLocaleString()} output tokens across ` +
+    `${rounds} round(s), roughly $${worst.toFixed(2)} at ${chosen.id} output rates.`;
 }
 
 function applyConfig(config) {
@@ -467,6 +484,14 @@ function applyConfig(config) {
   } else {
     models.innerHTML = `<option value="">${esc(model)}</option>`;
   }
+  models.onchange = showModelNote;
+
+  // The allowance is a spending control, so it is shown as money rather than as
+  // a token count nobody can price in their head.
+  const budget = el("f-budget");
+  if (!budget.value) budget.value = config.round_token_budget || 400000;
+  budget.oninput = showModelNote;
+  el("f-rounds").oninput = showModelNote;
   models.onchange = showModelNote;
   showModelNote();
 
@@ -556,6 +581,7 @@ async function onStart(event) {
         rounds: Number(el("f-rounds").value) || 3,
         reference: el("f-reference").value || null,
         model: el("f-model").value || null,
+        budget: Number(el("f-budget").value) || null,
       }),
     });
     hint.textContent = "started " + created.run_id;
@@ -1404,7 +1430,7 @@ function appendFeed(event) {
 
 function updateControls() {
   const busy = !!state.runId && !state.finished && (state.streamState === "live" || state.streamState === "replaying" || state.streamState === "reconnecting");
-  for (const id of ["f-prompt", "f-teams", "f-rounds", "f-reference", "f-key", "btn-start"]) {
+  for (const id of ["f-prompt", "f-teams", "f-rounds", "f-reference", "f-model", "f-budget", "f-key", "btn-start"]) {
     const node = el(id);
     if (node) node.disabled = busy;
   }

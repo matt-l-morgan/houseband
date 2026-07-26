@@ -395,6 +395,33 @@ def compose(
         messages.append({"role": "assistant", "content": message.content})
 
         tool_uses = [b for b in message.content if b.type == "tool_use"]
+
+        # A truncated turn is not a finished turn. Thinking counts against
+        # max_tokens, so a composer that reasons at length can spend the whole
+        # budget drafting the program inside its own head and get cut off before
+        # it ever emits the tool call. Treating that as "the agent is done" threw
+        # away a composer that was working perfectly well, so it is retried with
+        # an explicit nudge instead.
+        if getattr(message, "stop_reason", None) == "max_tokens" and not tool_uses:
+            log.warn(
+                f"{team} turn {turn + 1} hit the token ceiling before calling "
+                "render_midi; retrying with a shorter-planning nudge.",
+                round=round,
+                team=team,
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "You ran out of output budget before calling render_midi. "
+                        "Do not draft the program in your reasoning: plan briefly, "
+                        "then call render_midi with the complete program straight "
+                        "away. You can revise it once it has rendered."
+                    ),
+                }
+            )
+            continue
+
         if not tool_uses:
             # No more tools: the agent is done. Its final text is its own account
             # of the piece, which is useful context for the run log.
@@ -460,9 +487,12 @@ def compose(
         )
     else:
         if not result.error:
+            # Report the turns actually taken, not the limit. The earlier version
+            # interpolated max_turns and so claimed "8 turns" for a composer that
+            # had run exactly one, which sent me looking in the wrong place.
             result.error = (
-                f"No program passed validation in {max_turns} turns "
-                f"({result.render_attempts} attempts)."
+                f"No program passed validation in {result.turns} turn(s) "
+                f"({result.render_attempts} render attempts)."
             )
         log.emit(
             "composer.failed",

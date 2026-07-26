@@ -56,6 +56,20 @@ def _held_out_dimension(run_id: str) -> str:
     return DIMENSIONS[sum(ord(c) for c in run_id) % len(DIMENSIONS)]
 
 
+def _relative_to(path: Path | None, root: Path) -> str | None:
+    """Path relative to the run directory, which is what the files endpoint takes.
+
+    Emitting absolute paths would leak the host filesystem into the event log and
+    force the UI to know about it to build a link.
+    """
+    if not path:
+        return None
+    try:
+        return str(Path(path).resolve().relative_to(Path(root).resolve()))
+    except (ValueError, OSError):
+        return str(path)
+
+
 def _resolve_reference(name: str | None, config: cfg.Config) -> Path | None:
     if not name:
         candidates = sorted(config.references_dir.glob("*.mid")) + sorted(
@@ -114,6 +128,7 @@ def run(
     echo: bool = True,
     max_turns: int = 8,
     model: str | None = None,
+    budget: int | None = None,
 ) -> Path:
     """Execute a full run. Returns the run directory.
 
@@ -124,6 +139,8 @@ def run(
     config = config or cfg.load()
     if model:
         config.model = model
+    if budget:
+        config.round_token_budget = budget
     run_id = run_id or new_run_id()
     run_dir = config.runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -228,11 +245,14 @@ def run(
             log.emit("round.started", f"Round {round_no} of {rounds}", round=round_no)
 
             spent_before = log.output_tokens
-            budget_left = max(0, config.round_token_budget - 0)
+            # The per-round allowance, shared between the composers running
+            # this round. Previously written as "budget - 0", which quietly meant
+            # the guard never accounted for anything already spent.
+            budget_left = max(0, config.round_token_budget)
 
             # -- compose, in parallel ---------------------------------------
             def _compose(name: str) -> composer.ComposerResult:
-                return composer.compose(
+                result = composer.compose(
                     team=name,
                     brief=the_brief,
                     criteria=criteria,
@@ -247,6 +267,40 @@ def run(
                     learned_helpers=coach_mod.approved_helpers(),
                     budget_remaining=budget_left // max(1, len(team_names)),
                 )
+                # Render this team's audio now rather than after the whole round.
+                # Composers finish minutes apart, and making the first one wait on
+                # the slowest before it is even playable is a bad trade: rendering
+                # costs about a second and the point of the live view is to hear
+                # what just happened.
+                if result.ok and result.midi_path:
+                    try:
+                        artifacts = render.render_all(
+                            result.midi_path,
+                            round_dir / name,
+                            result.sidecar_path,
+                            stem="preview",
+                            config=config,
+                            title=f"{name} round {round_no}",
+                        )
+                        log.emit(
+                            "artifact.rendered",
+                            f"{name} is ready to play",
+                            round=round_no,
+                            team=name,
+                            candidate_id=f"preview-{name}-r{round_no}",
+                            preview=True,
+                            audio=_relative_to(artifacts.audio, run_dir),
+                            piano_roll=_relative_to(artifacts.piano_roll, run_dir),
+                            midi=_relative_to(result.midi_path, run_dir),
+                            program=_relative_to(round_dir / name / "program.py", run_dir),
+                        )
+                    except Exception as exc:
+                        log.warn(
+                            f"Could not render a preview for {name}: {exc}",
+                            round=round_no,
+                            team=name,
+                        )
+                return result
 
             with ThreadPoolExecutor(max_workers=len(team_names)) as pool:
                 results = list(pool.map(_compose, team_names))
@@ -285,33 +339,18 @@ def run(
                 candidates.append(candidate)
                 id_to_team[candidate.candidate_id] = result.team
 
-                # Paths are emitted relative to the run directory because that is
-                # exactly what the files endpoint takes, so the UI can build a
-                # link without knowing anything about the host filesystem.
-                def _rel(path: Path | None) -> str | None:
-                    if not path:
-                        return None
-                    try:
-                        return str(Path(path).resolve().relative_to(run_dir.resolve()))
-                    except ValueError:
-                        return str(path)
-
                 log.emit(
                     "artifact.rendered",
                     f"{candidate.candidate_id} artifacts ready",
                     round=round_no,
                     team=result.team,
                     candidate_id=candidate.candidate_id,
-                    piano_roll=_rel(candidate.piano_roll),
-                    audio=_rel(candidate.audio),
+                    piano_roll=_relative_to(candidate.piano_roll, run_dir),
+                    audio=_relative_to(candidate.audio, run_dir),
                     # The MIDI is the actual deliverable: audio is one render of
                     # it, and anyone wanting to open the result in a DAW needs this.
-                    midi=_rel(candidate.midi_path),
-                    program=_rel(
-                        (round_dir / result.team / "program.py")
-                        if (round_dir / result.team / "program.py").exists()
-                        else None
-                    ),
+                    midi=_relative_to(candidate.midi_path, run_dir),
+                    program=_relative_to(round_dir / result.team / "program.py", run_dir),
                 )
 
                 gate = validator.gate(
@@ -358,7 +397,7 @@ def run(
             calibration = check_calibration(verdicts)
             if not calibration.ok:
                 log.warn(
-                    "JUDGE CALIBRATION SUSPECT: " + calibration.summary,
+                    "JUDGE CALIBRATION SUSPECT: " + calibration.summary(),
                     round=round_no,
                     calibration=calibration.model_dump(),
                 )
@@ -455,6 +494,12 @@ def run(
             )
 
             spent = log.output_tokens - spent_before
+            if spent > config.round_token_budget:
+                log.warn(
+                    f"Round {round_no} used {spent:,} output tokens against a "
+                    f"{config.round_token_budget:,} allowance.",
+                    round=round_no,
+                )
             log.emit(
                 "round.finished",
                 f"Round {round_no} done, {spent:,} output tokens",
@@ -504,6 +549,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=f"Override the model for this run (default {cfg.DEFAULT_MODEL}).",
     )
+    parser.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        help="Output-token allowance per round (default "
+        f"{cfg.Config().round_token_budget:,}). The run halts past budget x rounds.",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -532,6 +584,7 @@ def main(argv: list[str] | None = None) -> int:
         echo=not args.quiet,
         max_turns=args.max_turns,
         model=args.model,
+        budget=args.budget,
     )
     print(f"\nRun complete: {run_dir}")
     return 0

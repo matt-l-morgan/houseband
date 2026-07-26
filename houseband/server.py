@@ -149,6 +149,10 @@ class RunIn(BaseModel):
     # table rather than passed through, so a typo becomes a 400 here instead of a
     # 404 from the API three minutes into a run.
     model: str | None = None
+    # Output-token allowance per round. Bounded rather than free-form: the floor
+    # stops a budget so small that no round can finish, and the ceiling stops a
+    # fat-fingered extra zero from becoming a surprise bill.
+    budget: int | None = Field(default=None, ge=20_000, le=20_000_000)
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +466,7 @@ def create_run(body: RunIn) -> dict[str, Any]:
     config = cfg.load()
     reference = _validated_reference(body.reference, config.references_dir)
     model = _validated_model(body.model) or config.model
+    budget = body.budget or config.round_token_budget
 
     run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
     run_dir = _run_dir(run_id, must_exist=False)
@@ -479,14 +484,15 @@ def create_run(body: RunIn) -> dict[str, Any]:
                 "reference": reference,
                 "created": datetime.now(timezone.utc).isoformat(),
                 "model": model,
+                "budget": budget,
             },
             indent=2,
         ),
         encoding="utf-8",
     )
 
-    _launch(run_id, run_dir, prompt, body.teams, body.rounds, reference, model)
-    return {"run_id": run_id, "model": model}
+    _launch(run_id, run_dir, prompt, body.teams, body.rounds, reference, model, budget)
+    return {"run_id": run_id, "model": model, "budget": budget}
 
 
 def _validated_model(model: str | None) -> str | None:
@@ -531,6 +537,7 @@ def _launch(
     rounds: int,
     reference: str | None,
     model: str | None = None,
+    budget: int | None = None,
 ) -> None:
     """Start the pipeline as a detached child, or record why we could not.
 
@@ -566,6 +573,8 @@ def _launch(
         command += ["--reference", reference]
     if model:
         command += ["--model", model]
+    if budget:
+        command += ["--budget", str(budget)]
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
