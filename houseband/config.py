@@ -150,6 +150,88 @@ def credential_source() -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Mode profiles
+# ---------------------------------------------------------------------------
+
+# Two deliverables, two sets of settings.
+#
+# "starter" is the one producers actually asked for: roughly half a minute of
+# loopable material to drag into Ableton and build on. Sixteen bars of 4/4 lands
+# between 22s (at 174bpm drum and bass) and 42s (at 90bpm), so bar count is the
+# knob rather than seconds -- bars are what a composer and a DAW both think in,
+# and pinning seconds would force awkward tempos.
+#
+# Speed is a feature here in a way it is not for long-form. Someone auditioning
+# ideas will not wait six minutes per take, so effort drops to medium and turns
+# are capped at three. That is a real trade: fewer turns means fewer chances to
+# apply a playbook rule, so starter mode learns more slowly per round and makes up
+# for it by making rounds cheap enough to run many.
+
+@dataclass(frozen=True)
+class ModeProfile:
+    """Everything that differs between a starter and a long-form piece."""
+
+    name: str
+    bars: int
+    effort: str
+    max_turns: int
+    max_tokens: int
+    approx_seconds: str
+    length_instruction: str
+
+    def target_seconds(self, bpm: float, beats_per_bar: int = 4) -> float:
+        """How long ``bars`` actually runs at a given tempo."""
+        return self.bars * beats_per_bar * 60.0 / bpm if bpm else 0.0
+
+
+STARTER_PROFILE = ModeProfile(
+    name="starter",
+    bars=16,
+    effort="medium",
+    max_turns=3,
+    # Still generous: thinking counts against this, and a truncated turn costs a
+    # whole retry. Lower than long-form because the program itself is shorter.
+    max_tokens=48_000,
+    approx_seconds="about 20 to 45 seconds depending on tempo",
+    length_instruction=(
+        "Write exactly {bars} bars. The material must loop: bar {last} has to lead "
+        "back into bar 0 without a seam, and nothing may sound past the end of bar "
+        "{last} except a short release tail."
+    ),
+)
+
+LONGFORM_PROFILE = ModeProfile(
+    name="longform",
+    bars=0,  # 0 means "as long as the brief implies"
+    effort=COMPOSER_EFFORT,
+    max_turns=8,
+    max_tokens=COMPOSER_MAX_TOKENS,
+    approx_seconds="whatever the brief asks for",
+    length_instruction=(
+        "Write a complete piece at the length the brief asks for, with a beginning, "
+        "a developed middle and an ending."
+    ),
+)
+
+PROFILES: dict[str, ModeProfile] = {
+    "starter": STARTER_PROFILE,
+    "longform": LONGFORM_PROFILE,
+}
+
+DEFAULT_MODE = "starter"
+
+
+def profile_for(mode: str, bars: int | None = None) -> ModeProfile:
+    """Resolve a mode to its profile, optionally overriding the bar count."""
+    base = PROFILES.get(mode, STARTER_PROFILE)
+    if bars and bars != base.bars:
+        from dataclasses import replace
+
+        return replace(base, bars=bars)
+    return base
+
+
 @dataclass
 class Config:
     """Everything a run needs to know that is not part of the creative brief."""

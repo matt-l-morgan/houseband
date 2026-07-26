@@ -11,6 +11,11 @@ Three judges of different kinds, deliberately:
 
 And one gate: :mod:`~houseband.judges.calibration` checks that the reference
 actually out-scored the agents before anything is learned from a round.
+
+Ranking is not the only way to choose what to keep, and for starters it is the
+wrong one: :mod:`~houseband.judges.diversity` selects a spread of usable takes
+without an LLM in the loop, because a producer wants six different ideas rather
+than one winner.
 """
 
 from houseband.judges.calibration import (
@@ -18,6 +23,17 @@ from houseband.judges.calibration import (
     Breach,
     CalibrationReport,
     check_calibration,
+)
+from houseband.judges.diversity import (
+    DESCRIPTOR_KEYS,
+    DESCRIPTOR_WEIGHTS,
+    descriptors,
+    distance,
+    diversity_matrix,
+    mean_distance,
+    niche_coverage,
+    niche_of,
+    select_varied,
 )
 from houseband.judges.elo import (
     DEFAULT_K,
@@ -34,6 +50,7 @@ from houseband.judges.rubric import (
     judge_dimension,
     load_rubric,
     missing_rubrics,
+    missing_rubrics_for_mode,
     run_panel,
 )
 
@@ -45,6 +62,7 @@ __all__ = [
     "run_panel",
     "load_rubric",
     "missing_rubrics",
+    "missing_rubrics_for_mode",
     # pairwise
     "compare",
     "tournament",
@@ -60,4 +78,14 @@ __all__ = [
     "Breach",
     "CalibrationReport",
     "check_calibration",
+    # diversity
+    "DESCRIPTOR_KEYS",
+    "DESCRIPTOR_WEIGHTS",
+    "descriptors",
+    "distance",
+    "diversity_matrix",
+    "mean_distance",
+    "niche_of",
+    "niche_coverage",
+    "select_varied",
 ]

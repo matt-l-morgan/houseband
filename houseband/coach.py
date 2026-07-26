@@ -36,6 +36,7 @@ from houseband.types import (
     CandidateVerdict,
     Finding,
     PlaybookRule,
+    ProducerFeedback,
     Role,
     StagedFunction,
 )
@@ -75,8 +76,24 @@ class CoachOutput(BaseModel):
     )
 
 
-SYSTEM = """You are a composition coach. You read judge findings on one team's
-piece and decide what that team should carry into the next round.
+SYSTEM = """You are a composition coach. You read feedback on one team's piece and
+decide what that team should carry into the next round.
+
+## Your evidence, in order of authority
+
+**Producer feedback outranks everything else.** When a producer tells you they
+kept the drums and deleted the pad, that is not an opinion about quality, it is
+the outcome the whole system exists to improve. A judge score is a proxy for
+usefulness; a producer keeping or binning a stem is usefulness itself. If the
+judges liked something the producer deleted, the producer is right and your rule
+should follow the producer.
+
+**Judge findings come second.** They are detailed, anchored and plentiful, which
+makes them the bulk of what you have to work with, and they are what you rely on
+when no producer feedback exists. But they are a model's guess at what a person
+would want.
+
+Where the two disagree, say so in the rule's `because`, and follow the producer.
 
 You are writing for a competent composer who will read your playbook before
 writing. Your output changes what they do, so it has to be specific enough to act
@@ -322,6 +339,50 @@ class Playbook:
 # ---------------------------------------------------------------------------
 
 
+def _format_producer_feedback(feedback: list[ProducerFeedback] | None) -> str:
+    """Render producer feedback for the coach, or say plainly that there is none.
+
+    Deliberately placed at the top of the prompt and labelled as outranking the
+    judges. Burying it below eight dimensions of rubric detail would let the
+    volume of judge findings drown the one signal that actually says whether the
+    output was useful.
+
+    The empty case is stated rather than omitted, because a coach that cannot tell
+    "the producer said nothing" from "there is no producer" may invent a
+    preference that was never expressed.
+    """
+    if not feedback:
+        return (
+            "## Producer feedback\n\n"
+            "None recorded for this round. Work from the judge findings below, and "
+            "do not invent a producer preference.\n\n"
+        )
+
+    lines = ["## Producer feedback (outranks the judges below)", ""]
+    for item in feedback:
+        lines.append(f"- {item.as_evidence()}")
+
+    kept: dict[str, int] = {}
+    binned: dict[str, int] = {}
+    for item in feedback:
+        for track in item.kept_tracks:
+            kept[track] = kept.get(track, 0) + 1
+        for track in item.discarded_tracks:
+            binned[track] = binned.get(track, 0) + 1
+    # A track deleted repeatedly is the clearest actionable signal available, so
+    # it is surfaced as a tally rather than left for the model to count.
+    if binned:
+        lines += ["", "Deleted most often: " + ", ".join(
+            f"{name} (x{count})" for name, count in sorted(binned.items(), key=lambda kv: -kv[1])
+        )]
+    if kept:
+        lines += ["Kept most often: " + ", ".join(
+            f"{name} (x{count})" for name, count in sorted(kept.items(), key=lambda kv: -kv[1])
+        )]
+    lines += [""]
+    return "\n".join(lines) + "\n"
+
+
 def _format_findings(verdict: CandidateVerdict) -> str:
     lines: list[str] = []
     for dimension in sorted(verdict.dimensions, key=lambda d: d.score):
@@ -350,6 +411,7 @@ def coach_team(
     client=None,
     config: cfg.Config | None = None,
     allow_staging: bool = True,
+    producer_feedback: list[ProducerFeedback] | None = None,
 ) -> tuple[list[PlaybookRule], list[StagedFunction]]:
     """Update one team's playbook from this round's verdict.
 
@@ -372,7 +434,9 @@ def coach_team(
             f"- [{f.severity}] [{f.attributed_role}] {f.claim}" for f in prior_findings[-40:]
         )
 
-    user = f"""## This round's verdict for the team you are coaching
+    producer_block = _format_producer_feedback(producer_feedback)
+
+    user = f"""{producer_block}## This round's judge verdict for the team you are coaching
 
 Weighted total: {verdict.weighted_total:.2f}/10
 
@@ -390,6 +454,7 @@ Weighted total: {verdict.weighted_total:.2f}/10
 ```
 
 Round number: {round}. {"You may stage a function if the evidence supports it." if allow_staging else "Do NOT stage a function this round."}
+Producer feedback available: {"yes" if producer_feedback else "no"}.
 """
 
     try:

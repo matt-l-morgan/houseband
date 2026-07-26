@@ -127,6 +127,15 @@ EventKind = Literal[
     "coach.rule_written",
     "coach.library_staged",
     "coach.finished",
+    # the producer
+    #
+    # The only kind not written by the pipeline. It arrives from the web server
+    # once a human has actually listened, which can be minutes or days after the
+    # run ended, so anything inferring a run's state from its final event has to
+    # skip past this one. It outranks every judge verdict above it: a rubric score
+    # is a proxy for usefulness, and a producer keeping or binning a stem is the
+    # thing itself.
+    "producer.feedback",
     # diagnostics
     "warning",
     "usage",

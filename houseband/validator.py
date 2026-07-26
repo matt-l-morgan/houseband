@@ -181,8 +181,44 @@ class ValidationReport:
         return "\n".join(lines)
 
 
+def same_pitch_overlaps(source) -> list[tuple[int, float, float]]:
+    """Find notes that retrigger a pitch already sounding on the same track.
+
+    Returns ``(pitch, second_note_start, first_note_end)`` per collision.
+
+    Accepts either a ``pretty_midi.Instrument`` or a bare list of notes, because
+    the two callers naturally hold different things: the validator walks
+    instruments off a parsed file, and export works on the note lists it is already
+    splitting into per-part files. Requiring one shape would push a pointless
+    ``.notes`` unwrap onto one of them.
+
+    Shared rather than duplicated because the callers want opposite consequences
+    from the same detection: the composer loop reports it as a warning so the agent
+    can fix it, and export treats it as a blocker, since a DAW turns it into an
+    audible droning note the producer cannot easily locate.
+    """
+    notes = getattr(source, "notes", source)
+
+    by_pitch: dict[int, list[tuple[float, float]]] = {}
+    for note in notes:
+        by_pitch.setdefault(note.pitch, []).append((note.start, note.end))
+
+    found: list[tuple[int, float, float]] = []
+    for pitch, spans in by_pitch.items():
+        spans.sort()
+        for (_, first_end), (second_start, _) in zip(spans, spans[1:]):
+            # Tolerance so a note ending exactly where the next begins (the normal
+            # case for legato writing) is not reported.
+            if second_start < first_end - 1e-6:
+                found.append((pitch, second_start, first_end))
+    return found
+
+
 def validate_score(
-    midi_path: Path, sidecar_path: Path | None = None, min_duration: float = 5.0
+    midi_path: Path,
+    sidecar_path: Path | None = None,
+    min_duration: float = 5.0,
+    strict_overlaps: bool = False,
 ) -> ValidationReport:
     """Check that a produced MIDI is a well-formed submission."""
     errors: list[str] = []
@@ -237,22 +273,18 @@ def validate_score(
                     f"nominal {lo}-{hi} range."
                 )
 
-    # Stuck notes: the same pitch retriggered while already sounding on one track.
+    # Stuck notes. A warning during composition and a hard error at export: a
+    # composer deserves a chance to fix it, but a producer importing a clip with a
+    # droning stuck note will simply delete the file.
     for inst in midi.instruments:
-        by_pitch: dict[int, list[tuple[float, float]]] = {}
-        for n in inst.notes:
-            by_pitch.setdefault(n.pitch, []).append((n.start, n.end))
-        overlaps = 0
-        for spans in by_pitch.values():
-            spans.sort()
-            for (s1, e1), (s2, _) in zip(spans, spans[1:]):
-                if s2 < e1 - 1e-6:
-                    overlaps += 1
-        if overlaps:
-            warnings.append(
-                f"track {inst.name or inst.program!r}: {overlaps} overlapping "
-                "same-pitch notes, which will sound like stuck notes."
-            )
+        overlaps = same_pitch_overlaps(inst)
+        if not overlaps:
+            continue
+        message = (
+            f"track {inst.name or inst.program!r}: {len(overlaps)} overlapping "
+            "same-pitch notes, which will sound like stuck notes."
+        )
+        (errors if strict_overlaps else warnings).append(message)
 
     if len(midi.instruments) == 1:
         warnings.append(

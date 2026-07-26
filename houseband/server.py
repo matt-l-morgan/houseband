@@ -26,6 +26,14 @@ On serving artifacts: every path from the browser is resolved and checked
 against the run directory before anything is opened. Run ids and staged function
 names are pattern-matched rather than sanitised, because an allowlist fails
 closed and a blocklist fails whenever someone thinks of a new encoding.
+
+On producer feedback, this module writes one event kind of its own. A rubric
+score is a proxy for usefulness; a producer keeping or binning a stem *is*
+usefulness, and the pipeline is long dead by the time anyone auditions its
+output, so the server is the only thing that can record it. It goes to
+``runs/<id>/feedback.jsonl`` first (that file is the durable record) and then
+into the event log, so the live view, a replay, and the coach all learn about it
+through the one channel they already read.
 """
 
 from __future__ import annotations
@@ -51,7 +59,7 @@ from pydantic import BaseModel, Field
 
 from houseband import config as cfg
 from houseband.events import Event, read_events, scrub, tail_events
-from houseband.types import DIMENSION_TITLES, DIMENSIONS
+from houseband.types import DIMENSION_TITLES, DIMENSION_WEIGHTS, DIMENSIONS, ProducerFeedback
 
 WEB_DIR = cfg.REPO_ROOT / "web"
 
@@ -73,6 +81,15 @@ HEARTBEAT_SECONDS = 15.0
 # Anchored patterns, not sanitisers: anything not matching is rejected outright.
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 FUNCTION_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+# Ids the pipeline actually mints: "c1", "r2c3", "preview-carbide-r1". No slashes,
+# no dots leading anywhere, so a candidate id can be pasted into a filename lookup
+# without a second traversal check having to save us.
+CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+# A producer's note is free text, but it lands in an append-only log that the
+# coach reads back into a prompt, so it gets a ceiling rather than being trusted
+# to be short. Rejecting is better than silently truncating what someone typed.
+MAX_NOTE_CHARS = 4000
 
 # Published so the UI's cost readout and this module cannot drift apart. Cache
 # writes cost 1.25x input and cache reads 0.1x, per the API's pricing model.
@@ -101,6 +118,7 @@ CONTENT_TYPES = {
     ".midi": "audio/midi",
     ".json": "application/json",
     ".jsonl": "application/x-ndjson",
+    ".zip": "application/zip",
     # Python and Markdown are served as plain text so a browser renders them
     # instead of prompting a download. These are artifacts you read.
     ".py": "text/plain; charset=utf-8",
@@ -129,6 +147,10 @@ _PROCESS_LOCK = threading.Lock()
 
 # Serialises the read-max-seq-then-append dance in _append_event.
 _WRITE_LOCK = threading.Lock()
+
+# Separate from _WRITE_LOCK so recording feedback never blocks on, or is blocked
+# by, an event append: the two files are independent and both are append-only.
+_FEEDBACK_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +201,23 @@ def _run_dir(run_id: str, must_exist: bool = True) -> Path:
     return path
 
 
+def _safe_path(run_dir: Path, path: str) -> Path | None:
+    """Resolve a run-relative path, or ``None`` if it leaves the run directory.
+
+    ``resolve()`` runs before the containment check so ``..`` and symlinks are
+    already collapsed by the time we compare. Returns ``None`` rather than
+    raising, because several callers treat "outside the run" and "not there" the
+    same way and only one of them is answering an HTTP request.
+    """
+    text = str(path or "")
+    if not text or text.startswith("/"):
+        return None
+    target = (run_dir / text).resolve()
+    if target != run_dir and run_dir not in target.parents:
+        return None
+    return target
+
+
 def _tail_lines(path: Path, window: int = 64 * 1024) -> list[str]:
     """Last complete lines of a file, without reading the whole thing.
 
@@ -208,12 +247,14 @@ def _head_lines(path: Path, window: int = 16 * 1024) -> list[str]:
     return [line for line in chunk.decode("utf-8", errors="ignore").splitlines() if line.strip()]
 
 
-def _parse_last(lines: list[str]) -> Event | None:
+def _parse_last(lines: list[str], kinds: frozenset[str] | None = None) -> Event | None:
     for line in reversed(lines):
         try:
-            return Event.model_validate_json(line)
+            event = Event.model_validate_json(line)
         except Exception:
             continue
+        if kinds is None or event.kind in kinds:
+            return event
     return None
 
 
@@ -230,16 +271,36 @@ def _last_event(run_dir: Path) -> Event | None:
     return _parse_last(_tail_lines(run_dir / "events.jsonl"))
 
 
+def _terminal_event(run_dir: Path, lines: list[str] | None = None) -> Event | None:
+    """The event that ended the run, ignoring anything appended after it.
+
+    "The last line" stopped being a safe proxy for "how the run ended" the moment
+    the log gained a kind that outlives the pipeline: producer feedback can arrive
+    hours later, and reading it as the run's final word would report every
+    finished run someone bothered to rate as mysteriously interrupted.
+    """
+    path = run_dir / "events.jsonl"
+    if lines is None:
+        lines = _tail_lines(path)
+    found = _parse_last(lines, TERMINAL_KINDS)
+    if found is None and any('"producer.feedback"' in line for line in lines):
+        # Enough feedback to fill the default window would push the lifecycle
+        # event out of it. Widen once, and only in the case that can need it.
+        found = _parse_last(_tail_lines(path, window=4 * 1024 * 1024), TERMINAL_KINDS)
+    return found
+
+
 def _process_alive(run_id: str) -> bool:
     with _PROCESS_LOCK:
         proc = _PROCESSES.get(run_id)
     return proc is not None and proc.poll() is None
 
 
-def _status_of(run_dir: Path, last: Event | None) -> str:
-    """Infer a run's state from its final event plus any process we still hold."""
-    if last is not None and last.kind in STATUS_FOR_KIND:
-        return STATUS_FOR_KIND[last.kind]
+def _status_of(run_dir: Path, last: Event | None, lines: list[str] | None = None) -> str:
+    """Infer a run's state from its lifecycle events plus any process we hold."""
+    terminal = _terminal_event(run_dir, lines)
+    if terminal is not None:
+        return STATUS_FOR_KIND[terminal.kind]
     if _process_alive(run_dir.name):
         return "running"
     if last is None:
@@ -252,10 +313,11 @@ def _status_of(run_dir: Path, last: Event | None) -> str:
 def _append_event(run_dir: Path, kind: str, message: str, **data: Any) -> Event:
     """Append one event on the pipeline's behalf.
 
-    Only used to report a launch or child-process failure that the pipeline
-    itself was never alive to report. Everything goes through ``scrub`` because
-    the payload can include a child's stderr, and stderr is exactly where a
-    misconfigured credential tends to surface.
+    Reserved for the things the pipeline was never alive to say: a launch or
+    child-process failure that happened before or after it ran, and producer
+    feedback, which arrives once someone has actually listened. Everything goes
+    through ``scrub`` because the payload can include a child's stderr or a
+    human's typing, and both are places a credential can surface.
     """
     path = run_dir / "events.jsonl"
     with _WRITE_LOCK:
@@ -417,7 +479,10 @@ def list_runs() -> dict[str, Any]:
         if not entry.is_dir():
             continue
         request = _read_json(entry / "request.json", {})
-        last = _last_event(entry)
+        # One read of the tail, shared by the "last event" readout and the status
+        # inference, so a long runs list stays one file read per run.
+        lines = _tail_lines(entry / "events.jsonl")
+        last = _parse_last(lines)
         prompt = request.get("prompt")
         if not prompt:
             first = _parse_first(_head_lines(entry / "events.jsonl"))
@@ -427,7 +492,7 @@ def list_runs() -> dict[str, Any]:
             {
                 "run_id": entry.name,
                 "created": request.get("created") or _created_at(entry),
-                "status": _status_of(entry, last),
+                "status": _status_of(entry, last, lines),
                 "prompt": prompt or "",
                 "teams": request.get("teams"),
                 "rounds": request.get("rounds"),
@@ -635,8 +700,7 @@ def _watch(run_id: str, run_dir: Path, proc: subprocess.Popen) -> None:
     with _PROCESS_LOCK:
         cancelled = run_id in _CANCELLED
         _CANCELLED.discard(run_id)
-    last = _last_event(run_dir)
-    if last is not None and last.kind in TERMINAL_KINDS:
+    if _terminal_event(run_dir) is not None:
         return
     tail = "\n".join(_tail_lines(run_dir / "child.log", window=8 * 1024)[-40:])
     message = (
@@ -793,14 +857,653 @@ def get_run_file(run_id: str, path: str) -> FileResponse:
     run_dir = _run_dir(run_id)
     if not path or path.startswith("/"):
         raise HTTPException(status_code=400, detail="Path must be relative.")
-    target = (run_dir / path).resolve()
-    if target != run_dir and run_dir not in target.parents:
+    target = _safe_path(run_dir, path)
+    if target is None:
         raise HTTPException(status_code=403, detail="Path escapes the run directory.")
     if not target.is_file():
         raise HTTPException(status_code=404, detail="No such file in this run.")
     return FileResponse(
         target,
         media_type=CONTENT_TYPES.get(target.suffix.lower(), "application/octet-stream"),
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+# -- candidates --------------------------------------------------------------
+
+# The four artifact paths an artifact.rendered event carries. Named here so the
+# candidates endpoint and the page agree on the shape without either guessing.
+ARTIFACT_KEYS = ("audio", "piano_roll", "midi", "program")
+
+# A MIDI file we parse only because no sidecar was written. Above this size the
+# parse costs more than the metadata is worth on a request that has to stay
+# snappy, and anything this large is not a starter clip anyway.
+_MIDI_PARSE_LIMIT = 2 * 1024 * 1024
+
+
+def _run_relative(run_dir: Path, raw: Any) -> str | None:
+    """Normalise an artifact path from the log into a run-relative one.
+
+    The pipeline writes run-relative paths today, but it has written absolute and
+    repo-relative ones before, and the page's own ``relPath`` already forgives
+    all three. Doing the same here means a change of mind upstream costs nothing.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.replace("\\", "/").strip()
+    marker = f"/runs/{run_dir.name}/"
+    if marker in text:
+        text = text.split(marker, 1)[1]
+    prefix = f"runs/{run_dir.name}/"
+    if text.startswith(prefix):
+        text = text[len(prefix) :]
+    return text.lstrip("/") or None
+
+
+def _candidate_index(run_dir: Path) -> dict[str, dict[str, Any]]:
+    """Everything the log says about each candidate, in first-seen order.
+
+    Replayed from the event log rather than read from a summary file, because the
+    log is the only thing the pipeline is guaranteed to have written: a run that
+    died in round three still has two rounds of candidates worth auditioning, and
+    auditioning them is the entire point of this endpoint.
+
+    Ids seen only in a pairwise verdict get a stub entry. They are kept so that
+    feedback on them validates, and dropped from the listing by the caller,
+    because a card with nothing to play on it is not worth drawing.
+
+    Keyed on candidate id *and* round, because ids are only round-unique by
+    convention. Current runs mint ``r2c3``, but older ones reused ``c1`` every
+    round, and keying on the id alone would fold six takes into three and show
+    the last round's artifacts against the first round's scores.
+    """
+    index: dict[str, dict[str, Any]] = {}
+
+    def entry(candidate_id: str, event: Event) -> dict[str, Any]:
+        data = event.data or {}
+        round_no = event.round
+        if round_no is None and isinstance(data.get("round"), int):
+            round_no = data["round"]
+
+        key = f"{candidate_id}#{round_no}" if round_no is not None else candidate_id
+        found = index.get(key)
+        if found is None and round_no is None:
+            # An event that does not say which round it belongs to still belongs
+            # to a candidate we may already know. Attach to it rather than fork.
+            for existing in index.values():
+                if existing["candidate_id"] == candidate_id:
+                    found = existing
+                    break
+        if found is None:
+            found = index[key] = {
+                "candidate_id": candidate_id,
+                "team": None,
+                "round": round_no,
+                "is_reference": False,
+                "preview": False,
+                "first_seq": event.seq,
+                "artifacts": {},
+                "scores": {},
+                "gate": None,
+                # Track names the judges used. Not metadata, but the only track
+                # list some runs have. See _score_meta.
+                "finding_tracks": [],
+            }
+        team = data.get("team") or event.team
+        if team and not found["team"]:
+            found["team"] = str(team)
+        if data.get("is_reference") is True or candidate_id == "reference" or team == "reference":
+            found["is_reference"] = True
+        return found
+
+    for event in read_events(run_dir / "events.jsonl"):
+        data = event.data or {}
+        if event.kind == "artifact.rendered":
+            # The team fallback mirrors the page's own tolerance: a renamed key
+            # should cost a label, not a whole card.
+            candidate_id = str(data.get("candidate_id") or event.team or "")
+            if not candidate_id:
+                continue
+            found = entry(candidate_id, event)
+            # Per-team previews are rendered before the pool is blinded, so they
+            # are a different thing from a judged candidate and are marked as
+            # such rather than quietly mixed in with them.
+            if data.get("preview") is True:
+                found["preview"] = True
+            for key in ARTIFACT_KEYS:
+                relative = _run_relative(run_dir, data.get(key))
+                if relative:
+                    found["artifacts"][key] = relative
+
+        elif event.kind == "judge.verdict":
+            candidate_id = str(data.get("candidate_id") or "")
+            if not candidate_id:
+                continue
+            found = entry(candidate_id, event)
+            dimension = str(event.dimension or data.get("dimension") or "unknown")
+            findings = data.get("findings")
+            findings = findings if isinstance(findings, list) else []
+            samples = data.get("samples")
+            found["scores"][dimension] = {
+                "dimension": dimension,
+                "title": DIMENSION_TITLES.get(dimension, dimension),
+                "score": data.get("score") if isinstance(data.get("score"), int) else None,
+                "samples": [s for s in samples if isinstance(s, int)]
+                if isinstance(samples, list)
+                else [],
+                "spread": data.get("spread") if isinstance(data.get("spread"), int) else None,
+                "rationale": str(data.get("rationale") or ""),
+                # A count, not the findings themselves: the detail panel already
+                # gets those from the event stream, and a browse view that had to
+                # download every finding to draw a card would be slower for it.
+                "findings": len(findings),
+            }
+            for finding in findings:
+                track = finding.get("track") if isinstance(finding, dict) else None
+                if isinstance(track, str) and track.strip():
+                    name = track.strip()
+                    if name not in found["finding_tracks"]:
+                        found["finding_tracks"].append(name)
+
+        elif event.kind in ("gate.passed", "gate.rejected"):
+            # Keyed on candidate_id only. A gate event without one carries a team
+            # name, and a team name would collide with a preview's id.
+            candidate_id = str(data.get("candidate_id") or "")
+            if not candidate_id:
+                continue
+            found = entry(candidate_id, event)
+            found["gate"] = {"ok": event.kind == "gate.passed", "message": event.message}
+
+        elif event.kind == "pairwise.verdict":
+            for key in ("a", "b"):
+                candidate_id = data.get(key)
+                if isinstance(candidate_id, str) and candidate_id:
+                    entry(candidate_id, event)
+
+    return index
+
+
+def _find_candidate(
+    index: dict[str, dict[str, Any]], candidate_id: str, round_no: int | None
+) -> dict[str, Any] | None:
+    """Look a candidate up by id, preferring the round the caller named.
+
+    The id alone is what judges and the Elo table use, so it stays the public
+    handle. The round only breaks the tie left by runs that reused ids.
+    """
+    fallback: dict[str, Any] | None = None
+    for entry in index.values():
+        if entry["candidate_id"] != candidate_id:
+            continue
+        if round_no and entry["round"] == round_no:
+            return entry
+        if fallback is None:
+            fallback = entry
+    return fallback
+
+
+def _score_meta(run_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:
+    """Key, tempo, bar count and track list for one candidate.
+
+    Three sources in descending order of authority: the sidecar the composer
+    wrote next to its MIDI, the MIDI file itself, and the track names the judges
+    used in their findings. The last is a genuine fallback rather than a guess --
+    "the pads are muddying the mid" tells you there is a track called pad -- and
+    it is what keeps the per-track feedback rows usable for a run whose sidecar
+    was never written, which includes every reference piece.
+    """
+    meta: dict[str, Any] = {
+        "key": "",
+        "time_sig": None,
+        "tempo": None,
+        "total_bars": None,
+        "duration": None,
+        "sections": [],
+        "tracks": [],
+        "tracks_from": "none",
+    }
+    relative = entry["artifacts"].get("midi")
+    midi_path = _safe_path(run_dir, relative) if relative else None
+
+    if midi_path is not None:
+        sidecar = midi_path.with_suffix(".score.json")
+        payload = _read_json(sidecar, None) if sidecar.is_file() else None
+        if isinstance(payload, dict):
+            meta["key"] = str(payload.get("key") or "")
+            signature = payload.get("time_sig")
+            if isinstance(signature, list) and len(signature) == 2:
+                meta["time_sig"] = f"{signature[0]}/{signature[1]}"
+            tempo_map = payload.get("tempo_map")
+            if isinstance(tempo_map, list) and tempo_map:
+                first = tempo_map[0]
+                if isinstance(first, list) and len(first) == 2:
+                    meta["tempo"] = first[1]
+            if isinstance(payload.get("total_bars"), int):
+                meta["total_bars"] = payload["total_bars"]
+            if isinstance(payload.get("duration"), (int, float)):
+                meta["duration"] = round(float(payload["duration"]), 2)
+            sections = payload.get("sections")
+            if isinstance(sections, list):
+                meta["sections"] = [
+                    {
+                        "name": str(s.get("name") or ""),
+                        "start_bar": s.get("start_bar"),
+                        "bars": s.get("bars"),
+                    }
+                    for s in sections
+                    if isinstance(s, dict)
+                ]
+            tracks = payload.get("tracks")
+            if isinstance(tracks, list) and tracks:
+                meta["tracks"] = [
+                    {
+                        "name": str(t.get("name") or ""),
+                        "program": t.get("patch", t.get("program")),
+                        "is_drum": bool(t.get("is_drum")),
+                        "note_count": t.get("note_count"),
+                    }
+                    for t in tracks
+                    if isinstance(t, dict) and str(t.get("name") or "")
+                ]
+                meta["tracks_from"] = "sidecar"
+
+    if not meta["tracks"] and midi_path is not None and midi_path.is_file():
+        meta.update(_meta_from_midi(midi_path, meta))
+
+    if not meta["tracks"] and entry["finding_tracks"]:
+        meta["tracks"] = [
+            {"name": name, "program": None, "is_drum": None, "note_count": None}
+            for name in entry["finding_tracks"]
+        ]
+        meta["tracks_from"] = "judge findings"
+
+    return meta
+
+
+def _meta_from_midi(midi_path: Path, current: dict[str, Any]) -> dict[str, Any]:
+    """Read track names and duration straight out of a MIDI file.
+
+    Only reached when no sidecar exists. Failure is not interesting enough to
+    report: a candidate whose MIDI will not parse still has audio to audition and
+    a verdict to record, and an empty track list says so honestly.
+    """
+    out: dict[str, Any] = {}
+    try:
+        if midi_path.stat().st_size > _MIDI_PARSE_LIMIT:
+            return out
+        import pretty_midi
+
+        midi = pretty_midi.PrettyMIDI(str(midi_path))
+    except Exception:
+        return out
+    tracks = []
+    for index, instrument in enumerate(midi.instruments):
+        name = (instrument.name or "").strip() or (
+            "drums" if instrument.is_drum else f"track{index}_program{instrument.program}"
+        )
+        tracks.append(
+            {
+                "name": name,
+                "program": instrument.program,
+                "is_drum": bool(instrument.is_drum),
+                "note_count": len(instrument.notes),
+            }
+        )
+    if tracks:
+        out["tracks"] = tracks
+        out["tracks_from"] = "midi"
+    if current.get("duration") is None:
+        try:
+            out["duration"] = round(float(midi.get_end_time()), 2)
+        except Exception:
+            pass
+    if current.get("tempo") is None:
+        try:
+            _, tempi = midi.get_tempo_changes()
+            if len(tempi):
+                out["tempo"] = round(float(tempi[0]), 2)
+        except Exception:
+            pass
+    return out
+
+
+def _weighted_total(scores: list[dict[str, Any]]) -> float | None:
+    """Weighted mean on the 1-10 scale, matching CandidateVerdict.weighted_total."""
+    total = weight_sum = 0.0
+    for score in scores:
+        value = score.get("score")
+        if not isinstance(value, int):
+            continue
+        weight = DIMENSION_WEIGHTS.get(str(score.get("dimension")), 1.0)
+        total += value * weight
+        weight_sum += weight
+    return round(total / weight_sum, 3) if weight_sum else None
+
+
+@app.get("/api/runs/{run_id}/candidates")
+def list_candidates(run_id: str) -> dict[str, Any]:
+    """Every candidate in one run, with artifacts, scores and any feedback.
+
+    What the variation browser reads. Ordered as generated rather than ranked:
+    for idea generation a producer is better served by six varied takes than by
+    one Elo winner, and a payload that arrived pre-sorted by score would be
+    quietly arguing the opposite.
+    """
+    run_dir = _run_dir(run_id)
+    index = _candidate_index(run_dir)
+    records = _read_feedback(run_dir)
+    zips = _export_zips(run_dir)
+
+    candidates: list[dict[str, Any]] = []
+    for entry in index.values():
+        if not entry["artifacts"] and not entry["scores"] and entry["gate"] is None:
+            continue
+        candidate_id = entry["candidate_id"]
+        meta = _score_meta(run_dir, entry)
+        # Published in rubric order, with anything unrecognised appended, so the
+        # page can draw a fixed set of bars and a new dimension still shows up.
+        ordered = [entry["scores"][key] for key in DIMENSIONS if key in entry["scores"]]
+        ordered += [value for key, value in entry["scores"].items() if key not in DIMENSIONS]
+        values = [s["score"] for s in ordered if isinstance(s.get("score"), int)]
+        export = _match_export(zips, candidate_id)
+        feedback, feedback_count = _feedback_for(records, candidate_id, entry["round"])
+        candidates.append(
+            {
+                "candidate_id": candidate_id,
+                "team": entry["team"],
+                "round": entry["round"],
+                "is_reference": entry["is_reference"],
+                "preview": entry["preview"],
+                "first_seq": entry["first_seq"],
+                "artifacts": entry["artifacts"],
+                "gate": entry["gate"],
+                "scores": ordered,
+                "mean_score": round(sum(values) / len(values), 3) if values else None,
+                "weighted_total": _weighted_total(ordered),
+                "key": meta["key"],
+                "tempo": meta["tempo"],
+                "time_sig": meta["time_sig"],
+                "total_bars": meta["total_bars"],
+                "duration": meta["duration"],
+                "sections": meta["sections"],
+                "tracks": meta["tracks"],
+                "tracks_from": meta["tracks_from"],
+                "feedback": feedback,
+                "feedback_count": feedback_count,
+                "export": {
+                    "available": export is not None,
+                    # Relative, not absolute: the browser has no use for this
+                    # server's directory layout and no business knowing it.
+                    "file": export.relative_to(run_dir).as_posix() if export else None,
+                },
+            }
+        )
+
+    candidates.sort(key=lambda item: (item["first_seq"], item["candidate_id"]))
+    return {
+        "run_id": run_id,
+        "candidates": candidates,
+        "feedback_count": len(records),
+    }
+
+
+# -- producer feedback -------------------------------------------------------
+
+
+def _feedback_path(run_dir: Path) -> Path:
+    return run_dir / "feedback.jsonl"
+
+
+def _read_feedback(run_dir: Path) -> list[dict[str, Any]]:
+    """Every feedback record for a run, oldest first. Bad lines are skipped."""
+    path = _feedback_path(run_dir)
+    records: list[dict[str, Any]] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return records
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _feedback_for(
+    records: list[dict[str, Any]], candidate_id: str, round_no: int | None
+) -> tuple[dict[str, Any] | None, int]:
+    """The newest record for one candidate, and how many there are.
+
+    Append-only, so the last matching write is the producer's current opinion and
+    the earlier ones are the history of them changing their mind. A record whose
+    round is unset matches any round, because that is a record from a client that
+    did not know, not a record about a different take.
+    """
+    latest: dict[str, Any] | None = None
+    count = 0
+    for record in records:
+        if record.get("candidate_id") != candidate_id:
+            continue
+        recorded = record.get("round")
+        if isinstance(recorded, int) and recorded and round_no and recorded != round_no:
+            continue
+        count += 1
+        latest = record
+    return latest, count
+
+
+def _clean_names(names: list[str], limit: int = 128) -> list[str]:
+    """Strip, drop blanks, and dedupe while keeping the producer's order."""
+    out: list[str] = []
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        text = name.strip()
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _append_feedback(run_dir: Path, record: dict[str, Any]) -> None:
+    with _FEEDBACK_LOCK:
+        path = _feedback_path(run_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+
+@app.get("/api/runs/{run_id}/feedback")
+def get_run_feedback(run_id: str) -> dict[str, Any]:
+    """Every feedback record for a run, oldest first.
+
+    The whole history rather than a current-opinion summary: a producer who kept a
+    stem on Monday and binned it on Tuesday has told the coach something, and a
+    view that collapsed the two would lose it. The candidates endpoint does the
+    collapsing for the cards that need it.
+    """
+    run_dir = _run_dir(run_id)
+    records = _read_feedback(run_dir)
+    return {"run_id": run_id, "feedback": records, "count": len(records)}
+
+
+@app.post("/api/runs/{run_id}/feedback")
+def post_run_feedback(run_id: str, body: ProducerFeedback) -> dict[str, Any]:
+    """Record what the producer thought, to disk and to the log.
+
+    ``feedback.jsonl`` is written first because it is the durable record; the
+    event is the notification, and a notification without a record behind it
+    would be the worse of the two failures. Append-only in both places: a
+    producer changing their mind is itself evidence, and overwriting it would
+    throw away the fact that a second listen went differently.
+    """
+    run_dir = _run_dir(run_id)
+    candidate_id = body.candidate_id.strip()
+    if not CANDIDATE_ID_RE.match(candidate_id):
+        raise HTTPException(status_code=400, detail="Malformed candidate id.")
+    if len(body.note) > MAX_NOTE_CHARS:
+        raise HTTPException(
+            status_code=400, detail=f"Note is longer than {MAX_NOTE_CHARS} characters."
+        )
+
+    entry = _find_candidate(_candidate_index(run_dir), candidate_id, body.round)
+    if entry is None:
+        # An id this run's log never mentions is a stale page or a typo. Storing
+        # it would put a record in the coach's evidence that no artifact backs.
+        raise HTTPException(
+            status_code=400, detail=f"No candidate {candidate_id!r} in run {run_id}."
+        )
+
+    feedback = ProducerFeedback(
+        candidate_id=candidate_id,
+        # The log already knows the team and the round, so the page does not have
+        # to be right about them for the record to be complete and attributable.
+        round=body.round or int(entry["round"] or 0),
+        team=body.team.strip() or (entry["team"] or ""),
+        verdict=body.verdict,
+        kept_tracks=_clean_names(body.kept_tracks),
+        discarded_tracks=_clean_names(body.discarded_tracks),
+        note=body.note.strip(),
+    )
+
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    record = scrub({"recorded_at": recorded_at, **feedback.model_dump()})
+    _append_feedback(run_dir, record)
+    event = _append_event(
+        run_dir,
+        "producer.feedback",
+        f"{candidate_id}: {feedback.as_evidence()}",
+        recorded_at=recorded_at,
+        **feedback.model_dump(),
+    )
+    return {
+        "run_id": run_id,
+        "candidate_id": candidate_id,
+        "recorded": record,
+        "event_seq": event.seq,
+    }
+
+
+# -- DAW export --------------------------------------------------------------
+
+
+def _export_zips(run_dir: Path) -> list[Path]:
+    """Every zip inside one run directory, containment re-checked after resolve."""
+    found: list[Path] = []
+    try:
+        for path in run_dir.rglob("*.zip"):
+            resolved = path.resolve()
+            if resolved.is_file() and run_dir in resolved.parents:
+                found.append(resolved)
+    except OSError:
+        return []
+    return sorted(set(found))
+
+
+def _match_export(zips: list[Path], candidate_id: str) -> Path | None:
+    """Find a candidate's bundle without pinning the exporter's naming scheme."""
+    for path in zips:
+        if path.stem == candidate_id:
+            return path
+    for path in zips:
+        if candidate_id in path.stem:
+            return path
+    return None
+
+
+def _generate_export(run_dir: Path, entry: dict[str, Any]) -> Path | None:
+    """Ask ``houseband.export`` for a bundle, if that module exists yet.
+
+    This server does not own the export format and should not pin a signature it
+    did not define, so it offers ``export_bundle`` only the arguments the
+    function actually declares and gives up if it declares a required one we
+    cannot name a value for. A call that does not fit, or does not work, produces
+    a 404: "there is no bundle here" is honest, and a traceback out of someone
+    else's module is noise.
+    """
+    try:
+        from houseband import export as export_mod
+    except ImportError:
+        return None
+    builder = getattr(export_mod, "export_bundle", None)
+    if not callable(builder):
+        return None
+
+    relative = entry["artifacts"].get("midi")
+    midi_path = _safe_path(run_dir, relative) if relative else None
+    if midi_path is None or not midi_path.is_file():
+        return None
+    sidecar = midi_path.with_suffix(".score.json")
+    out_dir = run_dir / "exports"
+    offered: dict[str, Any] = {
+        "midi_path": midi_path,
+        "midi": midi_path,
+        "run_dir": run_dir,
+        "out_dir": out_dir,
+        "outdir": out_dir,
+        "dest": out_dir,
+        "dest_dir": out_dir,
+        "sidecar_path": sidecar if sidecar.is_file() else None,
+        "sidecar": sidecar if sidecar.is_file() else None,
+        "stem": entry["candidate_id"],
+        "candidate_id": entry["candidate_id"],
+        "config": cfg.load(),
+    }
+
+    import inspect
+
+    try:
+        parameters = inspect.signature(builder).parameters
+        kwargs: dict[str, Any] = {}
+        for name, parameter in parameters.items():
+            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+                continue
+            if name in offered:
+                kwargs[name] = offered[name]
+            elif parameter.default is parameter.empty:
+                return None
+        out_dir.mkdir(parents=True, exist_ok=True)
+        result = builder(**kwargs)
+    except Exception:
+        return None
+
+    for attribute in ("zip_path", "zip", "path", "bundle", "archive"):
+        found = getattr(result, attribute, None)
+        if isinstance(found, (str, Path)) and Path(found).is_file():
+            return Path(found).resolve()
+    # The result did not name its own file, so fall back to looking for what it
+    # just wrote.
+    return _match_export(_export_zips(run_dir), entry["candidate_id"])
+
+
+@app.get("/api/runs/{run_id}/export/{candidate_id}")
+def get_export(run_id: str, candidate_id: str) -> FileResponse:
+    """Serve the DAW export zip for one candidate, if there is one."""
+    run_dir = _run_dir(run_id)
+    if not CANDIDATE_ID_RE.match(candidate_id):
+        raise HTTPException(status_code=400, detail="Malformed candidate id.")
+    path = _match_export(_export_zips(run_dir), candidate_id)
+    if path is None:
+        entry = _find_candidate(_candidate_index(run_dir), candidate_id, None)
+        if entry is not None:
+            path = _generate_export(run_dir, entry)
+    if path is None:
+        raise HTTPException(
+            status_code=404, detail=f"No DAW export bundle for {candidate_id} in this run."
+        )
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=path.name,
         headers={"Cache-Control": "no-cache"},
     )
 

@@ -182,6 +182,72 @@
   .dimblock > .row { border-bottom: 1px solid var(--line); padding-bottom: 5px; }
   .rationale { font-size: 12px; color: var(--ink-dim); margin-top: 5px; }
 
+  /* ---------- variation browser ----------
+     Cards of equal weight in a plain grid. No podium, no rank column: the point
+     of this view is that six varied takes beat one winner, and a layout that
+     put something first would be arguing the opposite of that. */
+  .vgrid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .vcard {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+    display: flex; flex-direction: column; overflow: hidden;
+    border-left: 3px solid var(--line);
+  }
+  .vcard.focus { border-color: var(--accent); border-left-color: var(--accent); }
+  .vcard.v-keep { border-left-color: var(--good); }
+  .vcard.v-maybe { border-left-color: var(--warn); }
+  .vcard.v-discard { border-left-color: var(--bad); }
+  .vcard.v-discard .vmedia { opacity: 0.55; }
+  .vcard .vtop { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; padding: 8px 10px 6px; }
+  .vcard .vid { font-family: var(--mono); font-weight: 700; font-size: 13px; }
+  .vcard .vteam { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
+  .vcard .vmean { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+  .vroll {
+    display: block; width: 100%; height: 90px; object-fit: cover;
+    background: #fff; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft);
+  }
+  .vroll.none { height: 90px; background: #0f1218; display: flex; align-items: center; justify-content: center;
+                color: var(--ink-faint); font-family: var(--mono); font-size: 11px; }
+  .vcard .vbody { padding: 8px 10px; display: flex; flex-direction: column; gap: 7px; }
+  .vmeta { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim); word-break: break-word; }
+  .vcard audio { height: 32px; }
+  .sparks { display: flex; align-items: flex-end; gap: 2px; height: 24px; }
+  .sparks i { flex: 1 1 0; min-width: 3px; border-radius: 1px 1px 0 0; background: var(--line); }
+  .vfb { padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .vverdicts { display: flex; gap: 5px; }
+  .vbtn {
+    flex: 1; padding: 5px 0; font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    background: #0f1218; color: var(--ink-faint);
+  }
+  .vbtn.on.keep { background: var(--good); border-color: var(--good); color: #0b0d11; }
+  .vbtn.on.maybe { background: var(--warn); border-color: var(--warn); color: #0b0d11; }
+  .vbtn.on.discard { background: var(--bad); border-color: var(--bad); color: #0b0d11; }
+  .vtracks { max-height: 178px; overflow-y: auto; }
+  .trk {
+    display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center;
+    padding: 2px 0; border-bottom: 1px solid var(--line-soft);
+    font-family: var(--mono); font-size: 11px;
+  }
+  .trk .tname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tbtn {
+    padding: 0 5px; font-size: 10px; font-weight: 700; line-height: 17px;
+    border-radius: 4px; border: 1px solid var(--line); background: #0f1218; color: var(--ink-faint);
+  }
+  .tbtn.on.keep { background: var(--good); border-color: var(--good); color: #0b0d11; }
+  .tbtn.on.discard { background: var(--bad); border-color: var(--bad); color: #0b0d11; }
+  .vnote { min-height: 38px; font-size: 12px; padding: 5px 7px; }
+  .vsave { display: flex; gap: 6px; align-items: center; }
+  .vsave button { padding: 5px 10px; font-size: 11px; }
+  .vstatus { font-size: 10.5px; color: var(--ink-faint); font-family: var(--mono); }
+  .vstatus.ok { color: var(--good); }
+  .vstatus.bad { color: var(--bad); }
+  .vlinks { display: flex; gap: 5px; flex-wrap: wrap; }
+  .vlinks a, .vlinks button { font-family: var(--mono); font-size: 10px; padding: 2px 7px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink-dim); text-decoration: none; }
+  .vlinks a:hover { border-color: var(--accent); color: var(--accent); }
+  .keys { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); padding-bottom: 8px; }
+  .keys b { color: var(--ink-dim); font-weight: 700; }
+
   /* ---------- feed ---------- */
   details.feed summary { cursor: pointer; font-size: 13px; color: var(--ink-dim); list-style: none; }
   details.feed summary::-webkit-details-marker { display: none; }
@@ -254,6 +320,36 @@
     <div class="lanes" id="lanes"><div class="empty">Waiting for composer.started.</div></div>
   </section>
 
+  <!--
+    Above the judge panel on purpose. The producer's verdict outranks every
+    rubric score below it: a score is a proxy for usefulness, and someone keeping
+    or binning a stem is usefulness itself. Putting the leaderboard first would
+    have said the opposite.
+  -->
+  <section class="panel" id="browse-panel">
+    <header>
+      <h2>Variation browser</h2>
+      <span class="hint" id="browse-hint">for finding a usable idea, not for crowning a winner</span>
+      <div class="row" style="margin-left:auto;gap:6px">
+        <select id="b-round" style="width:auto" title="round"></select>
+        <select id="b-sort" style="width:auto" title="ordering">
+          <option value="generated">as generated</option>
+          <option value="verdict">by producer verdict</option>
+          <option value="score">by judge score</option>
+        </select>
+        <label class="hint" style="margin:0;display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0">
+          <input type="checkbox" id="b-previews" style="width:auto" checked> previews
+        </label>
+        <button type="button" id="b-refresh">Refresh</button>
+      </div>
+    </header>
+    <div class="keys">
+      keys <b>&larr; &rarr;</b> move · <b>1</b> keep · <b>2</b> maybe · <b>3</b> discard ·
+      <b>p</b> play/pause · <b>n</b> note · <b>enter</b> submit · <b>esc</b> leave the note
+    </div>
+    <div class="vgrid" id="browse-grid"><div class="empty">Attach to a run to browse its takes.</div></div>
+  </section>
+
   <div class="grid-2">
     <section class="panel">
       <header><h2>Judge panel</h2><span class="hint" id="judge-hint"></span></header>
@@ -321,6 +417,18 @@ const state = {
   openTools: new Set(),
   detailMediaKey: "",
   feedCount: 0,
+  // The variation browser. Its candidates come from /api/runs/<id>/candidates
+  // rather than from the event stream, because tracks, key and tempo live in the
+  // score sidecar and only the server can read that.
+  browse: {
+    loaded: false,
+    candidates: [],
+    sort: "generated",
+    round: "all",
+    previews: true,
+    drafts: new Map(),   // card key -> unsaved feedback
+    focus: null,         // card key
+  },
 };
 
 const el = (id) => document.getElementById(id);
@@ -479,7 +587,7 @@ function applyConfig(config) {
     models.innerHTML = MODELS.map((m) => {
       const price = `$${m.input_per_mtok}/$${m.output_per_mtok} per MTok`;
       return `<option value="${esc(m.id)}"${m.default ? " selected" : ""}>` +
-        `${esc(m.id)} — ${esc(price)}</option>`;
+        `${esc(m.id)} - ${esc(price)}</option>`;
     }).join("");
   } else {
     models.innerHTML = `<option value="">${esc(model)}</option>`;
@@ -539,6 +647,31 @@ function wireControls() {
   el("f-runs").addEventListener("change", (event) => {
     if (event.target.value) attachRun(event.target.value);
   });
+
+  el("b-sort").addEventListener("change", (event) => {
+    state.browse.sort = event.target.value;
+    renderBrowse();
+  });
+  el("b-round").addEventListener("change", (event) => {
+    state.browse.round = event.target.value;
+    renderBrowse();
+  });
+  el("b-previews").addEventListener("change", (event) => {
+    state.browse.previews = event.target.checked;
+    renderBrowse();
+  });
+  el("b-refresh").addEventListener("click", () => loadCandidates());
+
+  document.addEventListener("keydown", onBrowseKey);
+
+  // 'play' does not bubble, so this is a capture listener. Starting one take
+  // stops the others: auditioning six variations means comparing them one at a
+  // time, and two playing at once is never what anyone meant.
+  el("browse-grid").addEventListener("play", (event) => {
+    el("browse-grid").querySelectorAll("audio").forEach((node) => {
+      if (node !== event.target) node.pause();
+    });
+  }, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -632,6 +765,7 @@ function attachRun(runId) {
   url.searchParams.set("run", runId);
   history.replaceState(null, "", url);
   loadStaged();
+  loadCandidates();
 }
 
 function resetRun(runId) {
@@ -656,8 +790,15 @@ function resetRun(runId) {
   state.openTools = new Set();
   state.detailMediaKey = "";
   state.feedCount = 0;
+  state.browse.loaded = false;
+  state.browse.candidates = [];
+  state.browse.drafts = new Map();
+  state.browse.focus = null;
+  browseNodes.clear();
+  browseOrder = "";
   el("feed").innerHTML = "";
   el("detail-media").innerHTML = "";
+  el("browse-grid").innerHTML = "";
   el("run-label").textContent = runId;
   renderAll();
 }
@@ -714,6 +855,7 @@ function connect(runId, fromSeq) {
     updateControls();
     refreshRuns();
     loadStaged();
+    loadCandidates();
   });
 
   source.addEventListener("error", (message) => {
@@ -917,6 +1059,9 @@ function applyEvent(event) {
         laneEntry.note = "rendered " + entry.id;
       }
       if (!state.selected) state.selected = entry.id;
+      // Something new is playable, which is the one thing the browse view most
+      // wants to know. Its tracks and tempo come from the sidecar, so ask.
+      scheduleCandidates(800);
       break;
     }
 
@@ -936,8 +1081,15 @@ function applyEvent(event) {
         findings: Array.isArray(pick(data, "findings")) ? pick(data, "findings") : [],
       });
       if (!state.selected) state.selected = entry.id;
+      scheduleCandidates(2000);
       break;
     }
+
+    case "producer.feedback":
+      // Recorded by this page or by another one attached to the same run. Either
+      // way the server is the record, so re-read rather than guess.
+      scheduleCandidates(400);
+      break;
 
     case "judge.failed":
       break;
@@ -1071,6 +1223,558 @@ async function approveStaged(name) {
 }
 
 // ---------------------------------------------------------------------------
+// Variation browser and producer feedback
+//
+// The cards are built once and then mutated in place. Rebuilding them on every
+// event would restart an audio element mid-listen and wipe a half-typed note,
+// and both of those are worse than any amount of diffing code: a producer is
+// auditioning here, not watching.
+// ---------------------------------------------------------------------------
+
+// key -> { node, mediaSig, trackSig }. DOM, so it lives outside state.
+const browseNodes = new Map();
+let browseOrder = "";
+
+function browseKey(entry) {
+  // Ids are only round-unique by convention: older runs reused c1 every round.
+  return entry.candidate_id + "#" + (entry.round == null ? "-" : entry.round);
+}
+
+function draftFor(entry) {
+  const key = browseKey(entry);
+  let draft = state.browse.drafts.get(key);
+  if (!draft) {
+    draft = { verdict: null, tracks: new Map(), note: "", dirty: false, saved: null, error: "", busy: false };
+    state.browse.drafts.set(key, draft);
+  }
+  return draft;
+}
+
+// Feedback already on the server seeds the card, which is what makes reattaching
+// to a run show what you already said about it. A draft the producer has touched
+// is never overwritten: their unsaved edit outranks their last saved one.
+function seedDraft(entry) {
+  const draft = draftFor(entry);
+  const feedback = entry.feedback;
+  if (!feedback) return;
+  draft.saved = feedback.recorded_at || "recorded";
+  if (draft.dirty) return;
+  draft.verdict = feedback.verdict || null;
+  draft.note = feedback.note || "";
+  draft.tracks = new Map();
+  (feedback.kept_tracks || []).forEach((name) => draft.tracks.set(name, "keep"));
+  (feedback.discarded_tracks || []).forEach((name) => draft.tracks.set(name, "discard"));
+}
+
+let candidatesTimer = null;
+function scheduleCandidates(delay) {
+  // Coalesced, because a replay can deliver hundreds of events in a second and
+  // every one of them is a reason the candidate list might have changed.
+  if (candidatesTimer) clearTimeout(candidatesTimer);
+  candidatesTimer = setTimeout(() => { candidatesTimer = null; loadCandidates(); }, delay || 1200);
+}
+
+async function loadCandidates() {
+  if (!state.runId) return;
+  const runId = state.runId;
+  let payload;
+  try {
+    payload = await api(`/api/runs/${encodeURIComponent(runId)}/candidates`);
+  } catch (_) {
+    return;   // a run with no candidates yet is the normal case, not an error
+  }
+  if (state.runId !== runId) return;   // attached elsewhere while we waited
+  state.browse.candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+  state.browse.loaded = true;
+  state.browse.candidates.forEach(seedDraft);
+  renderBrowse();
+}
+
+function browseList() {
+  const browse = state.browse;
+  let list = browse.candidates.slice();
+  if (!browse.previews) list = list.filter((entry) => !entry.preview);
+  if (browse.round !== "all") list = list.filter((entry) => String(entry.round) === browse.round);
+
+  const byOrder = (a, b) => (a.first_seq || 0) - (b.first_seq || 0);
+  if (browse.sort === "verdict") {
+    // Unrated sits between maybe and discard, so working down the list is the
+    // same motion as working through what you have not listened to yet.
+    const rank = { keep: 0, maybe: 1, discard: 3 };
+    const rankOf = (entry) => {
+      const verdict = draftFor(entry).verdict;
+      return verdict ? rank[verdict] : 2;
+    };
+    list.sort((a, b) => rankOf(a) - rankOf(b) || byOrder(a, b));
+  } else if (browse.sort === "score") {
+    list.sort((a, b) => (num(b.weighted_total) || 0) - (num(a.weighted_total) || 0) || byOrder(a, b));
+  } else {
+    list.sort(byOrder);
+  }
+  return list;
+}
+
+function entryFor(key) {
+  return state.browse.candidates.find((entry) => browseKey(entry) === key) || null;
+}
+
+function formatSeconds(seconds) {
+  const value = num(seconds);
+  if (value === null) return null;
+  const whole = Math.round(value);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+function sparkHtml(scores) {
+  if (!scores || !scores.length) return '<div class="hint">not judged yet</div>';
+  const bars = scores.map((entry) => {
+    const score = num(entry.score);
+    const height = score === null ? 6 : Math.max(10, (score / 10) * 100);
+    const label = `${entry.title || entry.dimension}: ${score === null ? "-" : score}/10` +
+      (entry.spread ? ` ±${entry.spread}` : "") + (entry.findings ? ` · ${entry.findings}f` : "");
+    const fill = score === null ? "var(--line)" : scoreColor(score);
+    return `<i title="${esc(label)}" style="height:${height.toFixed(0)}%;background:${fill}"></i>`;
+  }).join("");
+  return `<div class="sparks">${bars}</div>`;
+}
+
+function mediaHtml(entry) {
+  const rollUrl = fileUrl(entry.artifacts && entry.artifacts.piano_roll);
+  const audioUrl = fileUrl(entry.artifacts && entry.artifacts.audio);
+  const midiUrl = fileUrl(entry.artifacts && entry.artifacts.midi);
+  const programUrl = fileUrl(entry.artifacts && entry.artifacts.program);
+  const exportUrl = entry.export && entry.export.available
+    ? `/api/runs/${encodeURIComponent(state.runId)}/export/${encodeURIComponent(entry.candidate_id)}`
+    : null;
+
+  const meta = [
+    entry.key || null,
+    num(entry.tempo) !== null ? Math.round(entry.tempo) + " bpm" : null,
+    entry.time_sig || null,
+    num(entry.total_bars) !== null ? entry.total_bars + " bars" : null,
+    formatSeconds(entry.duration),
+    (entry.tracks || []).length ? (entry.tracks || []).length + " tracks" : null,
+  ].filter(Boolean).join(" · ");
+
+  const mean = num(entry.weighted_total);
+  const badges = [
+    entry.preview ? '<span class="chip warn">preview</span>' : "",
+    entry.is_reference ? '<span class="pin">reference</span>' : "",
+    entry.gate && entry.gate.ok === false ? '<span class="chip bad">gate rejected</span>' : "",
+  ].join("");
+
+  const links = [
+    midiUrl ? `<a href="${midiUrl}" download="${esc(entry.candidate_id)}.mid">download MIDI</a>` : "",
+    exportUrl ? `<a href="${exportUrl}" download>DAW zip</a>` : "",
+    rollUrl ? `<a href="${rollUrl}" target="_blank" rel="noreferrer">roll</a>` : "",
+    programUrl ? `<a href="${programUrl}" target="_blank" rel="noreferrer">program</a>` : "",
+    `<button type="button" data-detail="1" title="show the judge findings for this take">findings</button>`,
+  ].join("");
+
+  return `<div class="vtop">
+      <span class="vid">${esc(entry.candidate_id)}</span>
+      ${entry.team ? `<span class="vteam">${esc(entry.team)}</span>` : ""}
+      ${entry.round != null ? `<span class="vteam">r${esc(entry.round)}</span>` : ""}
+      ${badges}
+      <span class="vmean">${mean === null ? "unscored" : mean.toFixed(2) + "/10"}</span>
+    </div>
+    ${rollUrl
+      ? `<img class="vroll" src="${rollUrl}" alt="piano roll for ${esc(entry.candidate_id)}" loading="lazy">`
+      : '<div class="vroll none">no piano roll</div>'}
+    <div class="vbody">
+      ${audioUrl ? `<audio controls preload="none" src="${audioUrl}"></audio>`
+                 : '<div class="hint">no audio rendered</div>'}
+      <div class="vmeta">${esc(meta || "no score metadata")}</div>
+      ${sparkHtml(entry.scores)}
+      <div class="vlinks">${links}</div>
+    </div>`;
+}
+
+function feedbackHtml(entry) {
+  const tracks = entry.tracks || [];
+  const rows = tracks.length
+    ? tracks.map((track) => {
+        const name = String(track.name || "");
+        const count = num(track.note_count);
+        return `<div class="trk">
+          <span class="tname" title="${esc(name)}${track.program != null ? " · program " + esc(track.program) : ""}">${esc(name)}</span>
+          <span class="spread">${count === null ? "" : count + "n"}</span>
+          <span>
+            <button type="button" class="tbtn keep" data-track="${esc(name)}" data-mark="keep" title="keep this stem">K</button>
+            <button type="button" class="tbtn discard" data-track="${esc(name)}" data-mark="discard" title="bin this stem">D</button>
+          </span>
+        </div>`;
+      }).join("")
+    : '<div class="hint">no track list for this take</div>';
+
+  const bulk = tracks.length
+    ? `<div class="row" style="gap:5px">
+         <button type="button" class="tbtn" data-bulk="keep">keep all</button>
+         <button type="button" class="tbtn" data-bulk="discard">bin all</button>
+         <button type="button" class="tbtn" data-bulk="clear">clear</button>
+         <span class="hint" style="margin-left:auto">per-stem is the useful part</span>
+       </div>`
+    : "";
+
+  return `<div class="vverdicts">
+      <button type="button" class="vbtn keep" data-verdict="keep">1 keep</button>
+      <button type="button" class="vbtn maybe" data-verdict="maybe">2 maybe</button>
+      <button type="button" class="vbtn discard" data-verdict="discard">3 discard</button>
+    </div>
+    ${bulk}
+    <div class="vtracks">${rows}</div>
+    <textarea class="vnote" rows="2" placeholder="what would you do with this? (n)"></textarea>
+    <div class="vsave">
+      <button type="button" class="primary" data-submit="1">Submit</button>
+      <span class="vstatus"></span>
+    </div>`;
+}
+
+// Wiring is split to match the two blocks that get rebuilt independently.
+// Calling one of these against a block it did not just build would double up its
+// listeners, and a verdict button with two click handlers toggles twice and so
+// does nothing at all.
+function wireMedia(node, key) {
+  const detail = node.querySelector("[data-detail]");
+  if (detail) {
+    detail.addEventListener("click", () => {
+      const entry = entryFor(key);
+      if (entry) select(entry.candidate_id);
+      el("detail-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+}
+
+function wireFeedback(node, key) {
+  node.querySelectorAll("[data-verdict]").forEach((button) => {
+    button.addEventListener("click", () => {
+      focusCard(key);
+      setVerdict(key, button.getAttribute("data-verdict"));
+    });
+  });
+
+  node.querySelectorAll("[data-track]").forEach((button) => {
+    button.addEventListener("click", () => {
+      focusCard(key);
+      markTrack(key, button.getAttribute("data-track"), button.getAttribute("data-mark"));
+    });
+  });
+
+  node.querySelectorAll("[data-bulk]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const mode = button.getAttribute("data-bulk");
+      const entry = entryFor(key);
+      if (!entry) return;
+      const draft = draftFor(entry);
+      draft.tracks = new Map();
+      if (mode !== "clear") (entry.tracks || []).forEach((track) => draft.tracks.set(String(track.name), mode));
+      draft.dirty = true;
+      draft.error = "";
+      focusCard(key);
+      renderBrowse();
+    });
+  });
+
+  const note = node.querySelector(".vnote");
+  if (note) {
+    note.addEventListener("input", () => {
+      const draft = draftFor(entryFor(key));
+      draft.note = note.value;
+      draft.dirty = true;
+      syncCard(node, entryFor(key));
+    });
+  }
+
+  const submit = node.querySelector("[data-submit]");
+  if (submit) submit.addEventListener("click", () => submitFeedback(key));
+}
+
+// Classes and text only. Anything that rewrote innerHTML here would take the
+// note field's contents and the audio element's position with it.
+function syncCard(node, entry) {
+  const key = browseKey(entry);
+  const draft = draftFor(entry);
+  node.className = "vcard" +
+    (state.browse.focus === key ? " focus" : "") +
+    (draft.verdict ? " v-" + draft.verdict : "");
+
+  node.querySelectorAll("[data-verdict]").forEach((button) => {
+    button.classList.toggle("on", draft.verdict === button.getAttribute("data-verdict"));
+  });
+  node.querySelectorAll("[data-track]").forEach((button) => {
+    const mark = draft.tracks.get(button.getAttribute("data-track")) || null;
+    button.classList.toggle("on", mark === button.getAttribute("data-mark"));
+  });
+
+  const note = node.querySelector(".vnote");
+  if (note && !draft.dirty && note.value !== draft.note) note.value = draft.note;
+
+  const kept = [...draft.tracks.values()].filter((mark) => mark === "keep").length;
+  const binned = [...draft.tracks.values()].filter((mark) => mark === "discard").length;
+  const status = node.querySelector(".vstatus");
+  const submit = node.querySelector("[data-submit]");
+  const anything = !!draft.verdict || draft.tracks.size > 0 || !!draft.note.trim();
+  if (submit) submit.disabled = draft.busy || !anything;
+  if (status) {
+    let text = "";
+    let cls = "vstatus";
+    if (draft.busy) {
+      text = "saving…";
+    } else if (draft.error) {
+      text = draft.error;
+      cls = "vstatus bad";
+    } else if (draft.dirty) {
+      text = `unsaved · ${kept}k ${binned}d`;
+    } else if (draft.saved) {
+      text = "recorded " + (clockOf(draft.saved) || "");
+      cls = "vstatus ok";
+    } else {
+      text = "not rated";
+    }
+    if (entry.feedback_count > 1) text += ` · ${entry.feedback_count} records`;
+    status.textContent = text;
+    status.className = cls;
+  }
+}
+
+function focusCard(key) {
+  if (state.browse.focus === key) return;
+  state.browse.focus = key;
+  browseNodes.forEach((held, heldKey) => {
+    const entry = entryFor(heldKey);
+    if (entry) syncCard(held.node, entry);
+  });
+}
+
+function setVerdict(key, verdict) {
+  const entry = entryFor(key);
+  if (!entry) return;
+  const draft = draftFor(entry);
+  // Clicking the current verdict clears it, so a mis-key is one keystroke to fix
+  // rather than a wrong record you cannot take back.
+  draft.verdict = draft.verdict === verdict ? null : verdict;
+  draft.dirty = true;
+  draft.error = "";
+  renderBrowse();
+}
+
+function markTrack(key, name, mark) {
+  const entry = entryFor(key);
+  if (!entry) return;
+  const draft = draftFor(entry);
+  if (draft.tracks.get(name) === mark) draft.tracks.delete(name);
+  else draft.tracks.set(name, mark);
+  draft.dirty = true;
+  draft.error = "";
+  renderBrowse();
+}
+
+async function submitFeedback(key) {
+  const entry = entryFor(key);
+  if (!entry || !state.runId) return;
+  const draft = draftFor(entry);
+  if (draft.busy) return;
+  draft.busy = true;
+  draft.error = "";
+  renderBrowse();
+
+  const kept = [];
+  const discarded = [];
+  draft.tracks.forEach((mark, name) => { (mark === "keep" ? kept : discarded).push(name); });
+
+  try {
+    const payload = await api(`/api/runs/${encodeURIComponent(state.runId)}/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        candidate_id: entry.candidate_id,
+        round: entry.round || 0,
+        team: entry.team || "",
+        // "maybe" is the model's own default, so marking stems without picking an
+        // overall verdict still records the part that matters.
+        verdict: draft.verdict || "maybe",
+        kept_tracks: kept,
+        discarded_tracks: discarded,
+        note: draft.note.trim(),
+      }),
+    });
+    const recorded = payload && payload.recorded;
+    draft.saved = (recorded && recorded.recorded_at) || new Date().toISOString();
+    draft.dirty = false;
+    draft.verdict = (recorded && recorded.verdict) || draft.verdict;
+    entry.feedback = recorded || entry.feedback;
+    entry.feedback_count = (entry.feedback_count || 0) + 1;
+  } catch (error) {
+    draft.error = truncate(error.message, 90);
+  } finally {
+    draft.busy = false;
+    renderBrowse();
+  }
+}
+
+function moveFocus(step) {
+  const list = browseList();
+  if (!list.length) return;
+  const at = list.findIndex((entry) => browseKey(entry) === state.browse.focus);
+  const next = at < 0 ? 0 : Math.max(0, Math.min(list.length - 1, at + step));
+  const key = browseKey(list[next]);
+  focusCard(key);
+  const held = browseNodes.get(key);
+  if (held) held.node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function onBrowseKey(event) {
+  const target = event.target;
+  const tag = target && target.tagName;
+  const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+                 (target && target.isContentEditable);
+  if (typing) {
+    // Escape hands the keyboard back to the browser; cmd/ctrl-enter submits from
+    // inside the note, which is where you are when you have finished writing it.
+    if (event.key === "Escape") target.blur();
+    else if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && state.browse.focus) {
+      event.preventDefault();
+      submitFeedback(state.browse.focus);
+    }
+    return;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  if (!browseNodes.size) return;
+
+  const key = state.browse.focus;
+  const held = key ? browseNodes.get(key) : null;
+
+  switch (event.key) {
+    case "ArrowRight": case "ArrowDown": case "l":
+      event.preventDefault(); moveFocus(1); return;
+    case "ArrowLeft": case "ArrowUp": case "h":
+      event.preventDefault(); moveFocus(-1); return;
+  }
+  if (!held) {
+    // Any rating key with nothing focused focuses the first card instead of
+    // silently doing nothing to nothing.
+    if ("123pn".includes(event.key) || event.key === "Enter") { moveFocus(0); }
+    return;
+  }
+  switch (event.key) {
+    case "1": event.preventDefault(); setVerdict(key, "keep"); break;
+    case "2": event.preventDefault(); setVerdict(key, "maybe"); break;
+    case "3": event.preventDefault(); setVerdict(key, "discard"); break;
+    case "p": {
+      event.preventDefault();
+      const audio = held.node.querySelector("audio");
+      if (audio) { if (audio.paused) audio.play().catch(() => {}); else audio.pause(); }
+      break;
+    }
+    case "n": {
+      event.preventDefault();
+      const note = held.node.querySelector(".vnote");
+      if (note) note.focus();
+      break;
+    }
+    case "Enter":
+      event.preventDefault();
+      submitFeedback(key);
+      break;
+  }
+}
+
+function renderBrowse() {
+  const grid = el("browse-grid");
+  const list = browseList();
+  renderBrowseControls(list);
+
+  if (!list.length) {
+    browseNodes.clear();
+    browseOrder = "";
+    grid.innerHTML = state.browse.loaded
+      ? '<div class="empty">This run has no candidates to browse yet.</div>'
+      : '<div class="empty">Attach to a run to browse its takes.</div>';
+    return;
+  }
+
+  const wanted = list.map(browseKey).join("|");
+  const seen = new Set();
+  for (const entry of list) {
+    const key = browseKey(entry);
+    seen.add(key);
+    let held = browseNodes.get(key);
+    if (!held) {
+      const node = document.createElement("div");
+      node.className = "vcard";
+      node.innerHTML = '<div class="vmedia"></div><div class="vfb"></div>';
+      held = { node: node, mediaSig: "", trackSig: "" };
+      browseNodes.set(key, held);
+      node.addEventListener("mousedown", () => focusCard(key), true);
+    }
+
+    const mediaSig = JSON.stringify([entry.artifacts, entry.scores, entry.key, entry.tempo,
+                                     entry.time_sig, entry.total_bars, entry.duration,
+                                     entry.export, entry.gate, entry.team, entry.preview]);
+    if (mediaSig !== held.mediaSig) {
+      held.mediaSig = mediaSig;
+      held.node.querySelector(".vmedia").innerHTML = mediaHtml(entry);
+      wireMedia(held.node, key);
+    }
+
+    const trackSig = JSON.stringify((entry.tracks || []).map((track) => [track.name, track.note_count]));
+    if (trackSig !== held.trackSig) {
+      held.trackSig = trackSig;
+      held.node.querySelector(".vfb").innerHTML = feedbackHtml(entry);
+      wireFeedback(held.node, key);
+    }
+
+    syncCard(held.node, entry);
+  }
+
+  for (const [key, held] of [...browseNodes]) {
+    if (!seen.has(key)) {
+      held.node.remove();
+      browseNodes.delete(key);
+    }
+  }
+
+  if (wanted !== browseOrder) {
+    browseOrder = wanted;
+    // appendChild on an attached node moves it. Media playback survives that:
+    // the pause steps only run if the element is still detached once the DOM
+    // settles, and it never is here.
+    if (grid.firstElementChild && grid.firstElementChild.classList.contains("empty")) grid.innerHTML = "";
+    for (const entry of list) grid.appendChild(browseNodes.get(browseKey(entry)).node);
+  }
+}
+
+function renderBrowseControls(list) {
+  const rounds = [...new Set(state.browse.candidates
+    .map((entry) => entry.round)
+    .filter((round) => round != null))].sort((a, b) => a - b);
+  const select = el("b-round");
+  const options = '<option value="all">all rounds</option>' +
+    rounds.map((round) => `<option value="${esc(round)}">round ${esc(round)}</option>`).join("");
+  if (select.innerHTML !== options) {
+    select.innerHTML = options;
+    select.value = rounds.map(String).includes(state.browse.round) ? state.browse.round : "all";
+    state.browse.round = select.value;
+  }
+
+  let kept = 0, maybe = 0, binned = 0, rated = 0;
+  for (const entry of list) {
+    const verdict = draftFor(entry).verdict;
+    if (verdict) rated += 1;
+    if (verdict === "keep") kept += 1;
+    else if (verdict === "maybe") maybe += 1;
+    else if (verdict === "discard") binned += 1;
+  }
+  const previews = list.filter((entry) => entry.preview).length;
+  el("browse-hint").textContent = list.length
+    ? `${list.length} take${list.length === 1 ? "" : "s"} side by side` +
+      (previews ? ` (${previews} pre-judging preview${previews === 1 ? "" : "s"})` : "") +
+      ` · ${kept} keep, ${maybe} maybe, ${binned} discard, ${list.length - rated} unrated` +
+      " · for finding a usable idea, not for crowning a winner"
+    : "for finding a usable idea, not for crowning a winner";
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
@@ -1088,6 +1792,7 @@ function renderAll() {
   renderUsage();
   renderHeaderChips();
   renderLanes();
+  renderBrowse();
   renderJudges();
   renderElo();
   renderRules();

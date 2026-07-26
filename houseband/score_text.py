@@ -243,7 +243,7 @@ def _fmt_beat(beat: float) -> str:
     return f"{round(beat, 2):g}"
 
 
-def _fmt_tempo(tempo: TempoMap) -> str:
+def format_tempo(tempo: TempoMap) -> str:
     """Summarise the tempo map, collapsing ramps.
 
     ``ramp_tempo`` writes one entry per bar, so a naive listing produces dozens
@@ -286,6 +286,12 @@ def _fmt_tempo(tempo: TempoMap) -> str:
     return ", ".join(parts)
 
 
+# Kept as an alias because export.py renders the same tempo summary into its
+# README, and two implementations of "how do we describe a tempo map" would
+# drift apart.
+_fmt_tempo = format_tempo
+
+
 def _render_bar(notes: list[BarNote], is_drum: bool) -> str:
     from houseband.house.core import DRUMS
 
@@ -322,7 +328,7 @@ def render(
 
     # -- header ------------------------------------------------------------
     num, den = s.get("time_sig", [view.tempo.beats_per_bar, 4])
-    tempo_desc = _fmt_tempo(view.tempo)
+    tempo_desc = format_tempo(view.tempo)
     minutes, seconds = divmod(int(view.duration), 60)
     out.append(
         f"KEY {s.get('key', 'unspecified')}   TIME {num}/{den}   "

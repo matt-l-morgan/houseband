@@ -29,25 +29,31 @@ from houseband.types import (
     PairwiseVerdict,
 )
 
-# A minimal program the composer "writes". Deliberately valid and long enough to
-# clear the gate's minimum-duration check.
+# A minimal program the composer "writes".
+#
+# Exactly 16 bars, because starter mode is the default and the DAW-readiness check
+# rejects anything sounding past the loop point. This fixture is deliberately a
+# valid *starter* rather than a long piece: it is what the app is mainly for, and a
+# 32-bar fixture was being correctly rejected by the very check we want covered.
+STARTER_BARS = 16
+
 GOOD_CODE = '''
 from houseband.house import Score
 
 s = Score(bpm=100, key="Am")
-s.mark_section("intro", 0, 8)
-s.mark_section("main", 8, 24)
+s.mark_section("intro", 0, 4)
+s.mark_section("main", 4, 12)
 
 keys = s.track("keys", patch="electric_piano", pan=-0.2)
 bass = s.track("bass", patch="fingered_bass")
 drums = s.drum_track("drums")
 
 PROG = ["Am", "F", "C", "G"]
-for bar in range(32):
+for bar in range(16):
     chord = PROG[bar % 4]
     keys.chord(bar, 1, symbol=chord, dur=3.5, vel=54 + (bar % 6) * 4)
     bass.note(bar, 1, ["A1", "F1", "C2", "G1"][bar % 4], 2.0, 70)
-    if bar >= 8:
+    if bar >= 4:
         drums.hit(bar, 1, "kick", 88)
         drums.hit(bar, 3, "snare", 76)
         for beat in (1, 2, 3, 4):

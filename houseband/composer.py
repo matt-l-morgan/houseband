@@ -119,15 +119,26 @@ def build_system_prompt(
     criteria: str,
     playbook: str,
     learned_helpers: list[str] | None = None,
+    mode: str = "starter",
+    profile: cfg.ModeProfile | None = None,
 ) -> list[dict]:
     """Assemble the composer's system prompt as cacheable blocks.
 
     Ordered stable-first so the cache breakpoint covers the library reference and
     role instructions, which are byte-identical across every team and every
     round. The per-team persona and playbook come after, since those change.
+
+    The role instructions differ by mode because the two jobs genuinely conflict:
+    a long-form piece is rewarded for developing and arriving somewhere, and a
+    starter is rewarded for looping cleanly and leaving space. Handing a composer
+    the long-form brief and then judging it on headroom would be unfair, and
+    handing it both would just be confusing.
     """
     library = _read_prompt("house_library.md")
-    role = _read_prompt("composer_system.md")
+    role = _read_prompt(
+        "composer_starter.md" if mode == "starter" else "composer_system.md"
+    )
+    profile = profile or cfg.profile_for(mode)
 
     helpers_note = ""
     if learned_helpers:
@@ -150,12 +161,28 @@ def build_system_prompt(
             "type": "text",
             "text": (
                 f"# Your sensibility\n\n{PERSONAS.get(team, '')}\n\n"
+                f"# Length\n\n{_length_instruction(profile)}\n\n"
                 f"# The brief\n\n{brief.render()}\n\n"
                 f"# Structural criteria for this genre\n\n{criteria}\n\n"
                 f"# Your playbook\n\n{playbook or '(empty: this is your first round)'}"
             ),
         },
     ]
+
+
+def _length_instruction(profile: cfg.ModeProfile) -> str:
+    """Spell out the bar count, because "about 30 seconds" is not actionable.
+
+    A composer works in bars and cannot know what a second is until it has chosen
+    a tempo, so the requirement is stated in bars and the duration is given as a
+    consequence rather than as the target.
+    """
+    if not profile.bars:
+        return profile.length_instruction
+    text = profile.length_instruction.format(
+        bars=profile.bars, last=profile.bars - 1
+    )
+    return f"{text}\n\nAt a typical tempo that is {profile.approx_seconds}."
 
 
 # How often to surface partial progress from a streaming turn. Composer turns run
@@ -262,6 +289,7 @@ def _handle_render(
     workdir: Path,
     config: cfg.Config,
     reference_midis: list[Path],
+    expect_bars: int | None = None,
 ) -> tuple[str, render.ProgramResult]:
     """Execute a program and turn the outcome into feedback the agent can act on."""
     result = render.execute_program(code, workdir, config=config)
@@ -279,9 +307,40 @@ def _handle_render(
             f"{gate.feedback()}\n\nScore summary:\n{summary}"
         ), render.ProgramResult(ok=False, error="rejected by gate", stdout=result.stdout)
 
+    # A starter is judged on whether a producer can loop it, so check that here
+    # rather than after the round. Telling a composer "bar 16 overhangs the loop
+    # point" while it can still fix it is worth far more than discovering it in a
+    # verdict, and this is the check that actually makes starters loop.
+    daw_problems: list[str] = []
+    daw_warnings: list[str] = []
+    if expect_bars:
+        try:
+            from houseband import export
+
+            daw_problems, daw_warnings = export.check_daw_ready(
+                result.midi_path, result.sidecar_path, expect_bars=expect_bars
+            )
+        except ImportError:
+            pass
+
+    if daw_problems:
+        return (
+            "Your program ran and the music is valid, but the result is not usable "
+            "as a loop a producer could import:\n"
+            + "\n".join(f"  - {p}" for p in daw_problems)
+            + f"\n\nScore summary:\n{summary}"
+        ), render.ProgramResult(
+            ok=False, error="not DAW-ready", stdout=result.stdout
+        )
+
     parts = ["Rendered and passed validation."]
     if gate.validation.warnings:
         parts.append(gate.validation.feedback())
+    if daw_warnings:
+        parts.append(
+            "Producer-usability warnings:\n"
+            + "\n".join(f"  - {w}" for w in daw_warnings)
+        )
     parts.append(f"Score summary:\n{summary}")
     parts.append(
         "If this is the piece you want to submit, stop calling tools and give a "
@@ -302,9 +361,11 @@ def compose(
     client=None,
     config: cfg.Config | None = None,
     reference_midis: list[Path] | None = None,
-    max_turns: int = 8,
+    max_turns: int | None = None,
     learned_helpers: list[str] | None = None,
     budget_remaining: int | None = None,
+    mode: str = "starter",
+    profile: cfg.ModeProfile | None = None,
 ) -> ComposerResult:
     """Run one composer to a submitted piece, or to exhaustion.
 
@@ -312,6 +373,13 @@ def compose(
     produce one is a normal outcome that the round absorbs, not an exception.
     """
     config = config or cfg.load()
+    profile = profile or cfg.profile_for(mode)
+    # The profile owns effort, turn count and token ceiling, because those three
+    # move together: a starter is cheap and fast precisely because it thinks less
+    # and revises less, and letting a caller set one without the others produces
+    # combinations nobody intended.
+    if max_turns is None:
+        max_turns = profile.max_turns
     reference_midis = reference_midis or []
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -321,14 +389,24 @@ def compose(
 
         client = anthropic.Anthropic()
 
-    system = build_system_prompt(team, brief, criteria, playbook, learned_helpers)
+    system = build_system_prompt(
+        team, brief, criteria, playbook, learned_helpers, mode=mode, profile=profile
+    )
     messages: list[dict] = [
         {
             "role": "user",
             "content": (
-                "Write the piece. Call render_midi when you have a complete "
-                "program, read the feedback, and revise until you are satisfied. "
-                "Then stop calling tools and describe what you wrote."
+                (
+                    f"Write the {profile.bars}-bar starter. Call render_midi with a "
+                    "complete program, read the feedback, revise at most once, then "
+                    "stop calling tools and describe what the producer is getting."
+                )
+                if profile.bars
+                else (
+                    "Write the piece. Call render_midi when you have a complete "
+                    "program, read the feedback, and revise until you are satisfied. "
+                    "Then stop calling tools and describe what you wrote."
+                )
             ),
         }
     ]
@@ -338,6 +416,7 @@ def compose(
 
     best: render.ProgramResult | None = None
     best_code = ""
+    expect_bars = profile.bars or None
 
     for turn in range(max_turns):
         result.turns = turn + 1
@@ -350,8 +429,8 @@ def compose(
         try:
             with client.messages.stream(
                 model=config.model,
-                max_tokens=cfg.COMPOSER_MAX_TOKENS,
-                output_config={"effort": cfg.COMPOSER_EFFORT},
+                max_tokens=profile.max_tokens,
+                output_config={"effort": profile.effort},
                 # Summarised reasoning is the point of the live view: the default
                 # is "omitted", which streams thinking blocks with empty text and
                 # leaves the UI with nothing to show for the longest part of a turn.
@@ -444,7 +523,7 @@ def compose(
             )
 
             feedback, program_result = _handle_render(
-                code, workdir, config, reference_midis
+                code, workdir, config, reference_midis, expect_bars=expect_bars
             )
             if program_result.ok:
                 best, best_code = program_result, code

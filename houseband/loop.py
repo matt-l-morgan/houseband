@@ -31,6 +31,8 @@ from houseband import render, score_text, validator
 from houseband.events import EventLog, Usage
 from houseband.types import (
     DIMENSIONS,
+    DIMENSIONS_FOR_MODE,
+    ProducerFeedback,
     Brief,
     Candidate,
     CandidateVerdict,
@@ -44,7 +46,7 @@ def new_run_id() -> str:
     return f"{stamp}-{random.randint(0x1000, 0xffff):04x}"
 
 
-def _held_out_dimension(run_id: str) -> str:
+def _held_out_dimension(run_id: str, mode: str = "longform") -> str:
     """Pick one dimension the coach never sees, deterministically per run.
 
     Agents optimise against whatever the coach tells them about, so holding a
@@ -53,7 +55,8 @@ def _held_out_dimension(run_id: str) -> str:
     across runs stops any single dimension being permanently invisible to
     learning.
     """
-    return DIMENSIONS[sum(ord(c) for c in run_id) % len(DIMENSIONS)]
+    dims = DIMENSIONS_FOR_MODE.get(mode, DIMENSIONS)
+    return dims[sum(ord(c) for c in run_id) % len(dims)]
 
 
 def _relative_to(path: Path | None, root: Path) -> str | None:
@@ -68,6 +71,37 @@ def _relative_to(path: Path | None, root: Path) -> str | None:
         return str(Path(path).resolve().relative_to(Path(root).resolve()))
     except (ValueError, OSError):
         return str(path)
+
+
+def _producer_feedback_for(run_dir: Path, team: str, round_no: int) -> list[ProducerFeedback]:
+    """Read producer feedback the UI has recorded for this team and round.
+
+    Read from disk at coaching time rather than passed in, because the producer
+    rates takes while the round is still running and the pipeline has no channel
+    back from the browser. The file is append-only, so a late rating simply lands
+    in the next round's coaching instead of being lost.
+
+    Feedback on earlier rounds is included: a producer who deleted the pad twice
+    running is making a stronger point than one who did it once.
+    """
+    path = Path(run_dir) / "feedback.jsonl"
+    if not path.exists():
+        return []
+    out: list[ProducerFeedback] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = ProducerFeedback.model_validate_json(line)
+        except Exception:
+            continue
+        if item.team and item.team != team:
+            continue
+        if item.round and item.round > round_no:
+            continue
+        out.append(item)
+    return out
 
 
 def _resolve_reference(name: str | None, config: cfg.Config) -> Path | None:
@@ -126,9 +160,11 @@ def run(
     config: cfg.Config | None = None,
     client=None,
     echo: bool = True,
-    max_turns: int = 8,
+    max_turns: int | None = None,
     model: str | None = None,
     budget: int | None = None,
+    mode: str = "starter",
+    bars: int | None = None,
 ) -> Path:
     """Execute a full run. Returns the run directory.
 
@@ -141,6 +177,7 @@ def run(
         config.model = model
     if budget:
         config.round_token_budget = budget
+    profile = cfg.profile_for(mode, bars)
     run_id = run_id or new_run_id()
     run_dir = config.runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -152,7 +189,7 @@ def run(
     from houseband.judges import check_calibration, run_panel, tournament
     from houseband.judges.elo import DEFAULT_RATING, REFERENCE_RATING
 
-    held_out = _held_out_dimension(run_id)
+    held_out = _held_out_dimension(run_id, mode)
     team_names = list(composer.PERSONAS)[:teams] or ["conservatory"]
 
     log.emit(
@@ -164,6 +201,8 @@ def run(
         model=config.model,
         held_out_dimension=held_out,
         prompt=prompt,
+        mode=mode,
+        bars=profile.bars,
     )
 
     if cfg.credential_source() is None:
@@ -188,6 +227,8 @@ def run(
                 "rounds": rounds,
                 "model": config.model,
                 "held_out_dimension": held_out,
+                "mode": mode,
+                "bars": profile.bars,
                 "created": datetime.now(timezone.utc).isoformat(),
             },
             indent=2,
@@ -266,6 +307,8 @@ def run(
                     max_turns=max_turns,
                     learned_helpers=coach_mod.approved_helpers(),
                     budget_remaining=budget_left // max(1, len(team_names)),
+                    mode=mode,
+                    profile=profile,
                 )
                 # Render this team's audio now rather than after the whole round.
                 # Composers finish minutes apart, and making the first one wait on
@@ -282,6 +325,33 @@ def run(
                             config=config,
                             title=f"{name} round {round_no}",
                         )
+                        # The DAW bundle is the actual deliverable, so build it
+                        # here rather than on demand: a producer auditioning takes
+                        # should never wait on a zip, and the export also
+                        # double-checks the loop is importable.
+                        bundle = None
+                        export_problems: list[str] = []
+                        try:
+                            from houseband import export as export_mod
+
+                            result_export = export_mod.export_bundle(
+                                result.midi_path,
+                                result.sidecar_path,
+                                out_dir=round_dir / name / "daw",
+                                stem=f"{name}_r{round_no}",
+                                expect_bars=profile.bars or None,
+                                title=f"{name}, round {round_no}",
+                                brief=the_brief.prompt,
+                            )
+                            bundle = result_export.zip_path
+                            export_problems = result_export.problems
+                        except Exception as exc:
+                            log.warn(
+                                f"Could not build a DAW bundle for {name}: {exc}",
+                                round=round_no,
+                                team=name,
+                            )
+
                         log.emit(
                             "artifact.rendered",
                             f"{name} is ready to play",
@@ -293,6 +363,8 @@ def run(
                             piano_roll=_relative_to(artifacts.piano_roll, run_dir),
                             midi=_relative_to(result.midi_path, run_dir),
                             program=_relative_to(round_dir / name / "program.py", run_dir),
+                            daw_bundle=_relative_to(bundle, run_dir),
+                            daw_problems=export_problems,
                         )
                     except Exception as exc:
                         log.warn(
@@ -384,6 +456,7 @@ def run(
                 config=config,
                 log=log,
                 round=round_no,
+                mode=mode,
             )
             for candidate_id, verdict in verdicts.items():
                 verdict.team = id_to_team.get(candidate_id, verdict.team)
@@ -429,6 +502,26 @@ def run(
                 ratings[team] = rating
                 if team in state:
                     state[team].elo = rating
+            if mode == "starter" and len(candidates) > 1:
+                try:
+                    from houseband.judges import diversity
+
+                    varied = diversity.select_varied(
+                        candidates,
+                        verdicts,
+                        k=min(len(candidates), 3),
+                    )
+                    log.emit(
+                        "elo.updated",
+                        "Most varied usable takes: "
+                        + ", ".join(id_to_team.get(c, c) for c in varied),
+                        round=round_no,
+                        varied_selection=[id_to_team.get(c, c) for c in varied],
+                        ratings=ratings,
+                    )
+                except Exception as exc:
+                    log.warn(f"Diversity selection failed: {exc}", round=round_no)
+
             log.emit(
                 "elo.updated",
                 ", ".join(f"{k} {v:.0f}" for k, v in sorted(ratings.items())),
@@ -446,6 +539,16 @@ def run(
                 findings_history[team].extend(verdict.all_findings())
 
                 learned_path = Path(coach_mod.__file__).parent / "house" / "learned.py"
+                feedback = _producer_feedback_for(run_dir, team, round_no)
+                if feedback:
+                    log.emit(
+                        "coach.started",
+                        f"{team}: coaching with {len(feedback)} piece(s) of producer "
+                        "feedback, which outrank the judges",
+                        round=round_no,
+                        team=team,
+                        producer_feedback_count=len(feedback),
+                    )
                 _, staged = coach_mod.coach_team(
                     team=team,
                     verdict=_strip_held_out(verdict, held_out),
@@ -457,6 +560,7 @@ def run(
                     client=client,
                     config=config,
                     allow_staging=round_no > 1,
+                    producer_feedback=feedback,
                 )
                 for function in staged:
                     coach_mod.stage_function(
@@ -543,7 +647,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--reference", default=None, help="Filename in references/.")
     parser.add_argument("--run-id", default=None)
-    parser.add_argument("--max-turns", type=int, default=8)
+    parser.add_argument("--max-turns", type=int, default=None)
     parser.add_argument(
         "--model",
         default=None,
@@ -555,6 +659,15 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Output-token allowance per round (default "
         f"{cfg.Config().round_token_budget:,}). The run halts past budget x rounds.",
+    )
+    parser.add_argument(
+        "--mode",
+        default=cfg.DEFAULT_MODE,
+        choices=sorted(cfg.PROFILES),
+        help="starter (a loopable ~30s clip for a DAW) or longform (a whole piece).",
+    )
+    parser.add_argument(
+        "--bars", type=int, default=None, help="Override the starter bar count."
     )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
@@ -585,6 +698,8 @@ def main(argv: list[str] | None = None) -> int:
         max_turns=args.max_turns,
         model=args.model,
         budget=args.budget,
+        mode=args.mode,
+        bars=args.bars,
     )
     print(f"\nRun complete: {run_dir}")
     return 0

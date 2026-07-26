@@ -123,10 +123,15 @@ def main(argv: list[str] | None = None) -> int:
                 row += f"{'-':>12}"
                 continue
             weights_sum = total = 0.0
-            from houseband.types import DIMENSION_WEIGHTS
+            from houseband.types import DIMENSION_WEIGHTS, WEIGHTS_FOR_MODE
 
+            # Weighted by the mode the verdict was judged under, matching
+            # CandidateVerdict.weighted_total. A starter reweighted with
+            # long-form weights would report a number nobody ever computed, and
+            # runs logged before modes existed carry no mode at all.
+            weights = WEIGHTS_FOR_MODE.get(verdict.get("mode"), DIMENSION_WEIGHTS)
             for dimension in verdict["dimensions"]:
-                weight = DIMENSION_WEIGHTS.get(dimension["dimension"], 1.0)
+                weight = weights.get(dimension["dimension"], 1.0)
                 total += dimension["score"] * weight
                 weights_sum += weight
             score = total / weights_sum if weights_sum else 0.0
