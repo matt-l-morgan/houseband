@@ -1,0 +1,77 @@
+# Deliberately minimal. houseband is an application people clone and run, not a
+# library they depend on, so this file exists to make `pip install -e .`, pytest
+# and the Docker build work rather than to prepare a PyPI release.
+#
+# Note the packaging config below does not replace the PYTHONPATH=. workflow.
+# Both work, and both are used: PYTHONPATH=. is what render.py hands to the
+# subprocess that executes a composer's program, so it has to keep working
+# whether or not anyone ran `pip install -e .`.
+
+[build-system]
+# 77 is the floor for PEP 639's `license = "MIT"` string form used below.
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "houseband"
+version = "0.1.0"
+description = "An agentic music composition loop: composers, LLM judges, and a coach that turns critique into capability."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Matt Morgan" }]
+keywords = ["midi", "music", "llm", "agents", "llm-as-judge", "anthropic"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: MIDI",
+]
+
+# Kept in sync with requirements.txt by hand. requirements.txt is the one the
+# README and Dockerfile use, because it carries the reasoning in comments and
+# because `pip install -r` is what people reach for first.
+dependencies = [
+    "anthropic>=0.120.0",
+    "pretty_midi>=0.2.11",
+    "mido>=1.3.3",
+    "matplotlib>=3.11.0",
+    "pydantic>=2.13.0",
+    "fastapi>=0.140.0",
+    "uvicorn>=0.51.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/mattmorgan/houseband"
+
+[tool.setuptools.packages.find]
+# Only the package itself. examples/, scripts/ and tests/ are part of the repo,
+# not of the installed thing.
+include = ["houseband*"]
+
+[tool.setuptools.package-data]
+# The rubrics and prompts are data the judges and composers read at runtime, and
+# they are meant to be edited by users, so they must travel with the package
+# rather than being compiled in.
+#
+# web/index.html is deliberately not here. It lives at the repo root and the
+# server resolves it through config.REPO_ROOT, along with references/, runs/ and
+# playbooks/. Those are all working directories of a checkout rather than package
+# contents, which is why running from a clone is the supported deployment and
+# `pip install -e .` is the only install mode that behaves.
+houseband = ["judges/rubrics/*.md", "prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Import mode "importlib" keeps tests from needing __init__.py files, and rootdir
+# ends up on sys.path via the installed package or PYTHONPATH=. either way.
+addopts = "-q --strict-markers"
+filterwarnings = [
+    # pretty_midi emits a RuntimeWarning on tempo-change-heavy files, which the
+    # tempo ramp in examples/good_program.py triggers by design.
+    "ignore::RuntimeWarning:pretty_midi",
+]

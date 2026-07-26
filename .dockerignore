@@ -1,0 +1,48 @@
+# Keep the build context small and the image reproducible. Anything derived,
+# host-specific, or fetched during the build belongs here.
+
+# A macOS venv is useless in a Linux image and is the single largest thing in the
+# repo, so excluding it is most of the win.
+.venv/
+venv/
+env/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Fetched inside the image by scripts/fetch_soundfont.py. Copying a host bank in
+# would silently produce images whose audio differs from a clean build.
+soundfonts/
+*.sf2
+*.sf3
+
+# Run output from local runs. Large, and meaningless inside the image.
+runs/
+playbooks/
+
+# Host-specific paths, notably a soundfont location that does not exist in the
+# container. Letting this in would break find_soundfont() in the image.
+config.toml
+
+# Reference MIDI stays on the user's machine. It is mounted at runtime if wanted,
+# never copied into an image that might get pushed to a registry.
+references/
+
+.git/
+.gitignore
+.github/
+.DS_Store
+scratch/
+tmp/
+*.log
+
+# Docs and the Dockerfile itself are not needed by the running app.
+docs/
+Dockerfile
+.dockerignore

@@ -1,0 +1,36 @@
+# Direct dependencies only. Floors rather than exact pins: this is an
+# application people clone and run on whatever Python their machine has, and a
+# fully frozen set would break more installs than it protects.
+#
+# Floors are the versions this was developed and verified against, so a resolver
+# is free to go newer but not older.
+
+# The LLM client. The zero-argument Anthropic() constructor resolves
+# ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, and `ant auth login` profiles, which
+# is what lets users bring a credential without the repo knowing how.
+anthropic>=0.120.0
+
+# MIDI. pretty_midi is the read/write layer the house library and every judge
+# input is built on; mido is pretty_midi's own MIDI parser, listed explicitly
+# because a resolver silently dropping it would be a confusing failure.
+pretty_midi>=0.2.11
+mido>=1.3.3
+
+# Piano-roll rendering. A judge input, not a debugging nicety: repetition,
+# register collision and dynamic flatness are far more legible in a picture.
+matplotlib>=3.11.0
+
+# Event schemas, judge structured outputs, and the brief. The same models are
+# handed to the API as JSON Schema, so this is load-bearing, not convenience.
+pydantic>=2.13.0
+
+# The web app: run launcher plus SSE event tail.
+fastapi>=0.140.0
+uvicorn>=0.51.0
+
+# Deliberately absent:
+#   music21    - powerful, large, and nothing here uses it. The design notes
+#                listed it speculatively; pretty_midi covers the actual needs.
+#   numpy      - a real requirement, but pretty_midi and matplotlib both pull it
+#                in, and pinning it here only creates a second opinion to
+#                conflict with theirs.

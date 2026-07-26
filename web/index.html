@@ -1,0 +1,1367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>houseband</title>
+<!--
+  One file, no build, no CDN. A clone-and-run repo should not need npm, and a
+  remote import would make the UI stop working exactly when you are offline and
+  most want to watch a local run. Everything below is inline for that reason.
+
+  The page is a pure reader of the event log. It holds no authority over a run:
+  it starts one, then reflects whatever the log says. That is why a reload is
+  free (replay from the highest seq seen) and why an unknown event kind is a
+  non-event rather than a crash.
+-->
+<style>
+  :root {
+    --bg: #0d0f13;
+    --panel: #14171d;
+    --panel-2: #1a1e26;
+    --line: #262c37;
+    --line-soft: #1f242d;
+    --ink: #e7ebf2;
+    --ink-dim: #9aa4b4;
+    --ink-faint: #6b7482;
+    --accent: #7aa2f7;
+    --good: #56d364;
+    --warn: #e3b341;
+    --bad: #f2777a;
+    --ref: #c792ea;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-dim); }
+  h3 { font-size: 14px; }
+  code, pre, .mono, table, input, select, textarea, button { font-family: var(--mono); }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+
+  /* ---------- header ---------- */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; flex-wrap: wrap; gap: 14px 20px; align-items: center;
+    padding: 12px 20px;
+    background: linear-gradient(180deg, #10131a, #0d0f13);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { font-family: var(--mono); font-size: 18px; font-weight: 700; letter-spacing: -0.03em; }
+  .brand em { color: var(--accent); font-style: normal; }
+  .brand small { display: block; font-size: 10px; font-weight: 400; color: var(--ink-faint); letter-spacing: 0.06em; text-transform: uppercase; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-family: var(--mono); font-size: 11px;
+    padding: 3px 8px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--ink-dim);
+    white-space: nowrap;
+  }
+  .chip.ok { color: var(--good); border-color: #1f4426; }
+  .chip.warn { color: var(--warn); border-color: #4a3c14; }
+  .chip.bad { color: var(--bad); border-color: #4d2326; }
+  .chip.live { color: var(--accent); border-color: #24345c; }
+  .chip .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 5px; vertical-align: 1px; }
+  .chip.live .dot { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+  .usage { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; }
+  .tile {
+    min-width: 84px; padding: 5px 10px; border-radius: 8px;
+    background: var(--panel); border: 1px solid var(--line);
+  }
+  .tile .k { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint); }
+  .tile .v { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+  .tile.cost { border-color: #2c3a5c; background: #141a26; }
+  .tile.cost .v { color: var(--accent); }
+  .budget { min-width: 150px; }
+  .bar { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 5px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); transition: width 0.3s ease; }
+  .bar.hot > i { background: var(--bad); }
+
+  /* ---------- layout ---------- */
+  main { padding: 16px 20px 48px; display: flex; flex-direction: column; gap: 16px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .panel > header { position: static; background: none; border: 0; padding: 0 0 10px; display: flex; align-items: center; gap: 10px; }
+  .grid-2 { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); }
+  .scroll-x { overflow-x: auto; }
+
+  /* ---------- start form ---------- */
+  form.start { display: grid; gap: 12px; grid-template-columns: 1fr 120px 120px 1fr; align-items: end; }
+  form.start .wide { grid-column: 1 / -1; }
+  label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint); margin-bottom: 4px; }
+  input, select, textarea {
+    width: 100%; padding: 8px 10px; font-size: 13px;
+    background: #0f1218; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { min-height: 68px; resize: vertical; line-height: 1.5; }
+  button {
+    padding: 8px 16px; font-size: 13px; font-weight: 600;
+    border-radius: 6px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--ink); cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: #fff; }
+  button.primary { background: #1d2a45; border-color: #2c3f66; color: #cfe0ff; }
+  button.danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .hint { font-size: 11px; color: var(--ink-faint); }
+  .hint.bad { color: var(--bad); }
+
+  /* ---------- lanes ---------- */
+  .lanes { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .lane { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; min-height: 150px; }
+  .lane > .top { padding: 9px 11px; border-bottom: 1px solid var(--line-soft); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .lane .name { font-family: var(--mono); font-weight: 700; font-size: 13px; }
+  .lane .say { padding: 7px 11px; font-size: 11px; color: var(--ink-dim); border-bottom: 1px solid var(--line-soft); min-height: 30px; }
+  .lane .tools { padding: 4px 0; max-height: 230px; overflow-y: auto; }
+  .tool {
+    display: grid; grid-template-columns: 12px 1fr auto; gap: 7px; align-items: baseline;
+    padding: 3px 11px; font-family: var(--mono); font-size: 11px; cursor: pointer;
+  }
+  .tool:hover { background: #1e2430; }
+  .tool .sd { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; background: var(--warn); }
+  .tool.ok .sd { background: var(--good); }
+  .tool.fail .sd { background: var(--bad); }
+  .tool .tn { color: var(--ink); }
+  .tool .ta { color: var(--ink-faint); }
+  .tool .tt { color: var(--ink-faint); font-size: 10px; }
+  .tool-detail { padding: 4px 11px 8px 30px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim); background: #11151c; }
+  .lane .foot { margin-top: auto; padding: 7px 11px; border-top: 1px solid var(--line-soft); font-size: 11px; }
+
+  /* ---------- tables ---------- */
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+  th { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); font-weight: 600; }
+  tbody tr:hover { background: #181d26; }
+  td.dim { color: var(--ink-dim); font-family: var(--sans); white-space: normal; min-width: 150px; }
+  .cell { display: inline-flex; align-items: center; gap: 6px; }
+  .score { display: inline-block; min-width: 26px; text-align: center; padding: 2px 5px; border-radius: 5px; font-weight: 700; color: #0b0d11; }
+  .spread { font-size: 10px; color: var(--ink-faint); }
+  th.cand { cursor: pointer; }
+  th.cand:hover { color: var(--accent); }
+  th.cand.sel, td.sel { background: #1b2333; }
+  tr.reference td, tr.reference th { color: var(--ref); }
+  .pin { font-size: 9px; border: 1px solid #3d2f52; color: var(--ref); border-radius: 4px; padding: 1px 4px; }
+  .delta.up { color: var(--good); }
+  .delta.down { color: var(--bad); }
+
+  /* ---------- coach ---------- */
+  .rule { border-left: 2px solid var(--accent); padding: 6px 0 6px 10px; margin-bottom: 9px; }
+  .rule .role { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); }
+  .rule .because { font-size: 11px; color: var(--ink-faint); margin-top: 3px; }
+  .staged { border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; margin-bottom: 9px; background: var(--panel-2); }
+  .staged .row { justify-content: space-between; align-items: flex-start; }
+  .staged pre { margin-top: 8px; max-height: 220px; overflow: auto; font-size: 11px; background: #0f1218; padding: 9px; border-radius: 6px; border: 1px solid var(--line-soft); }
+
+  /* ---------- detail ---------- */
+  .detail-media { display: grid; gap: 12px; grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr); align-items: start; }
+  .detail-media img { width: 100%; border-radius: 8px; border: 1px solid var(--line); background: #fff; display: block; }
+  audio { width: 100%; }
+  .finding { border-top: 1px solid var(--line-soft); padding: 8px 0; }
+  .finding .anchor { font-family: var(--mono); font-size: 11px; color: var(--accent); }
+  .finding .sev { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); }
+  .sev.minor { color: var(--ink-dim); }
+  .sev.moderate { color: var(--warn); border-color: #4a3c14; }
+  .sev.major { color: var(--bad); border-color: #4d2326; }
+  .finding .fix { font-size: 12px; color: var(--ink-dim); margin-top: 3px; }
+  .dimblock { margin-top: 12px; }
+  .dimblock > .row { border-bottom: 1px solid var(--line); padding-bottom: 5px; }
+  .rationale { font-size: 12px; color: var(--ink-dim); margin-top: 5px; }
+
+  /* ---------- feed ---------- */
+  details.feed summary { cursor: pointer; font-size: 13px; color: var(--ink-dim); list-style: none; }
+  details.feed summary::-webkit-details-marker { display: none; }
+  details.feed summary::before { content: "▸ "; color: var(--ink-faint); }
+  details.feed[open] summary::before { content: "▾ "; }
+  #feed { margin-top: 10px; max-height: 340px; overflow-y: auto; font-family: var(--mono); font-size: 11px; border-top: 1px solid var(--line-soft); }
+  .ev { display: grid; grid-template-columns: 52px 1fr; gap: 8px; padding: 2px 4px; border-bottom: 1px solid var(--line-soft); }
+  .ev .seq { color: var(--ink-faint); text-align: right; }
+  .ev .kind { color: var(--accent); }
+  .ev.k-warning .kind, .ev.k-composer\.failed .kind, .ev.k-gate\.rejected .kind,
+  .ev.k-run\.failed .kind, .ev.k-judge\.failed .kind, .ev.k-run\.budget_exceeded .kind { color: var(--bad); }
+  .ev .msg { color: var(--ink-dim); }
+  .ev .tag { color: var(--ink-faint); }
+  .empty { color: var(--ink-faint); font-size: 12px; padding: 6px 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand"><em>house</em>band<small id="run-label">no run attached</small></div>
+  <div class="chips">
+    <span class="chip" id="chip-model">model …</span>
+    <span class="chip" id="chip-cred">credential …</span>
+    <span class="chip" id="chip-render">render …</span>
+    <span class="chip" id="chip-stream"><i class="dot"></i>idle</span>
+    <span class="chip" id="chip-round">round -</span>
+  </div>
+  <div class="usage" id="usage"></div>
+</header>
+
+<main>
+  <section class="panel">
+    <header><h2>New run</h2><span class="hint" id="start-hint"></span></header>
+    <form class="start" id="start-form" autocomplete="off">
+      <div class="wide">
+        <label for="f-prompt">Prompt</label>
+        <textarea id="f-prompt" placeholder="e.g. a 90-second dub techno cue: sparse, hypnotic, wide dub chords, deep sub bass"></textarea>
+      </div>
+      <div><label for="f-teams">Teams</label><input id="f-teams" type="number" min="1" max="8" value="3"></div>
+      <div><label for="f-rounds">Rounds</label><input id="f-rounds" type="number" min="1" max="20" value="3"></div>
+      <div><label for="f-reference">Reference MIDI</label><select id="f-reference"></select></div>
+      <div class="row" style="justify-content:flex-end">
+        <button type="submit" class="primary" id="btn-start">Start run</button>
+        <button type="button" class="danger" id="btn-cancel" disabled>Cancel</button>
+      </div>
+      <div class="wide" id="key-field" hidden>
+        <label for="f-key">Anthropic API key (kept in server memory only, never written to disk)</label>
+        <input id="f-key" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="wide row">
+        <label for="f-runs" style="margin:0">Attach to run</label>
+        <select id="f-runs" style="max-width:420px"></select>
+        <button type="button" id="btn-refresh-runs">Refresh</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <header><h2>Composers</h2><span class="hint" id="lanes-hint"></span></header>
+    <div class="lanes" id="lanes"><div class="empty">Waiting for composer.started.</div></div>
+  </section>
+
+  <div class="grid-2">
+    <section class="panel">
+      <header><h2>Judge panel</h2><span class="hint" id="judge-hint"></span></header>
+      <div class="scroll-x" id="judge-grid"><div class="empty">No verdicts yet.</div></div>
+    </section>
+
+    <section class="panel">
+      <header><h2>Elo</h2><span class="hint">reference is pinned</span></header>
+      <div class="scroll-x" id="elo"><div class="empty">No ratings yet.</div></div>
+      <div id="pairwise"></div>
+    </section>
+  </div>
+
+  <div class="grid-2">
+    <section class="panel">
+      <header><h2>Coach - playbook rules</h2></header>
+      <div id="rules"><div class="empty">No rules written yet.</div></div>
+    </section>
+    <section class="panel">
+      <header><h2>Coach - staged library functions</h2><span class="hint">approval is a human read</span></header>
+      <div id="staged"><div class="empty">Nothing staged.</div></div>
+    </section>
+  </div>
+
+  <section class="panel" id="detail-panel">
+    <header><h2>Candidate detail</h2><span class="hint" id="detail-hint">click a candidate column or a score</span></header>
+    <div id="detail-media"></div>
+    <div id="detail-body"></div>
+  </section>
+
+  <details class="panel feed" id="feed-panel">
+    <summary>Raw event feed</summary>
+    <div id="feed"></div>
+  </details>
+</main>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+const state = {
+  config: null,
+  runId: null,
+  es: null,
+  highestSeq: 0,
+  backoff: 1000,
+  finished: false,
+  streamState: "idle",
+  status: null,
+  round: null,
+  rounds: null,
+  usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, calls: 0 },
+  roundOutput: 0,
+  teams: new Map(),        // team -> lane state
+  candidates: new Map(),   // candidate id -> { team, isReference, round, media, verdicts }
+  elo: [],
+  pairwise: [],
+  rules: [],
+  staged: [],
+  selected: null,
+  openTools: new Set(),
+  detailMediaKey: "",
+  feedCount: 0,
+};
+
+const el = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+function esc(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// Event payloads are written by a pipeline under active development, so every
+// read is a guess with fallbacks rather than an assumption. A renamed key should
+// cost one blank field, not a blank page.
+function pick(obj, ...keys) {
+  if (!obj || typeof obj !== "object") return undefined;
+  for (const key of keys) {
+    const value = obj[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
+}
+
+const num = (value) => (typeof value === "number" && isFinite(value) ? value : null);
+const fmt = (n) => (typeof n === "number" && isFinite(n) ? n.toLocaleString() : "-");
+
+function truncate(text, limit) {
+  const value = String(text == null ? "" : text);
+  return value.length > limit ? value.slice(0, limit - 1) + "…" : value;
+}
+
+function oneLine(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.replace(/\s+/g, " ").trim();
+  try { return JSON.stringify(value).replace(/\s+/g, " "); } catch (_) { return String(value); }
+}
+
+function pretty(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value, null, 2); } catch (_) { return String(value); }
+}
+
+function clockOf(ts) {
+  if (!ts) return "";
+  const date = new Date(ts);
+  return isNaN(date) ? "" : date.toTimeString().slice(0, 8);
+}
+
+function scoreColor(score) {
+  const clamped = Math.max(1, Math.min(10, Number(score) || 1));
+  return `hsl(${((clamped - 1) / 9) * 128} 62% 58%)`;
+}
+
+// Artifact paths may arrive absolute, run-relative, or repo-relative. The files
+// endpoint only accepts run-relative, so normalise here rather than asking the
+// pipeline to care what the server's URL space looks like.
+function relPath(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  let path = raw.replace(/\\/g, "/");
+  const marker = "/runs/" + state.runId + "/";
+  const at = path.indexOf(marker);
+  if (at >= 0) return path.slice(at + marker.length);
+  const prefix = "runs/" + state.runId + "/";
+  if (path.startsWith(prefix)) return path.slice(prefix.length);
+  return path.replace(/^\/+/, "");
+}
+
+function fileUrl(path) {
+  const rel = relPath(path);
+  if (!rel) return null;
+  const parts = rel.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  return `/api/runs/${encodeURIComponent(state.runId)}/files/${parts}`;
+}
+
+async function api(url, options) {
+  const response = await fetch(url, options);
+  let payload = null;
+  try { payload = await response.json(); } catch (_) { /* empty body is fine */ }
+  if (!response.ok) {
+    const detail = (payload && (payload.detail || payload.message)) || response.statusText;
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
+async function boot() {
+  wireControls();
+  try {
+    state.config = await api("/api/config");
+  } catch (error) {
+    el("start-hint").textContent = "Could not load /api/config: " + error.message;
+    el("start-hint").className = "hint bad";
+    return;
+  }
+  applyConfig(state.config);
+  await refreshRuns();
+  renderAll();
+
+  // Deep link: ?run=<id> attaches without going through the picker, which is
+  // what makes a reload mid-run lossless rather than merely survivable.
+  const wanted = new URLSearchParams(location.search).get("run");
+  if (wanted) attachRun(wanted);
+}
+
+function applyConfig(config) {
+  const model = config.model || "unknown model";
+  el("chip-model").textContent = "model " + model;
+
+  const references = el("f-reference");
+  references.innerHTML = '<option value="">none</option>' +
+    (config.references || []).map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join("");
+  if (!(config.references || []).length) {
+    references.innerHTML = '<option value="">none available</option>';
+  }
+
+  const soundfont = config.soundfont && config.soundfont.present;
+  const fluidsynth = config.fluidsynth && config.fluidsynth.present;
+  const render = el("chip-render");
+  render.textContent = `render ${fluidsynth ? "fluidsynth" : "no fluidsynth"} · ${soundfont ? "soundfont" : "no soundfont"}`;
+  render.className = "chip " + (fluidsynth && soundfont ? "ok" : "warn");
+  render.title = [
+    "fluidsynth: " + ((config.fluidsynth && config.fluidsynth.path) || "missing"),
+    "soundfont: " + ((config.soundfont && config.soundfont.path) || "missing"),
+  ].join("\n");
+
+  applyCredential(config.credential || { configured: false, source: null });
+  renderUsage();
+}
+
+function applyCredential(credential) {
+  const chip = el("chip-cred");
+  if (credential.configured) {
+    chip.textContent = "credential " + (credential.source || "configured");
+    chip.className = "chip ok";
+    chip.title = "The server holds a credential source. The value is never sent to this page.";
+    el("key-field").hidden = true;
+  } else {
+    chip.textContent = "credential missing";
+    chip.className = "chip bad";
+    chip.title = "No ANTHROPIC_API_KEY, no auth token, and no ant profile. Submit a key below.";
+    el("key-field").hidden = false;
+  }
+  state.credential = credential;
+}
+
+function wireControls() {
+  el("start-form").addEventListener("submit", onStart);
+  el("btn-cancel").addEventListener("click", onCancel);
+  el("btn-refresh-runs").addEventListener("click", () => refreshRuns());
+  el("f-runs").addEventListener("change", (event) => {
+    if (event.target.value) attachRun(event.target.value);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Launch, cancel, attach
+// ---------------------------------------------------------------------------
+
+async function onStart(event) {
+  event.preventDefault();
+  const hint = el("start-hint");
+  hint.className = "hint";
+  hint.textContent = "";
+
+  const prompt = el("f-prompt").value.trim();
+  if (!prompt) {
+    hint.className = "hint bad";
+    hint.textContent = "A prompt is required.";
+    return;
+  }
+
+  el("btn-start").disabled = true;
+  try {
+    const key = el("key-field").hidden ? "" : el("f-key").value.trim();
+    if (key) {
+      const credential = await api("/api/credential", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: key }),
+      });
+      // The response carries a source name and nothing resembling the key.
+      el("f-key").value = "";
+      applyCredential(credential);
+    }
+
+    const created = await api("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: prompt,
+        teams: Number(el("f-teams").value) || 3,
+        rounds: Number(el("f-rounds").value) || 3,
+        reference: el("f-reference").value || null,
+      }),
+    });
+    hint.textContent = "started " + created.run_id;
+    attachRun(created.run_id);
+    refreshRuns();
+  } catch (error) {
+    hint.className = "hint bad";
+    hint.textContent = error.message;
+  } finally {
+    updateControls();
+  }
+}
+
+async function onCancel() {
+  if (!state.runId) return;
+  el("btn-cancel").disabled = true;
+  try {
+    const result = await api(`/api/runs/${encodeURIComponent(state.runId)}/cancel`, { method: "POST" });
+    el("start-hint").className = "hint";
+    el("start-hint").textContent = result.detail || "cancelled";
+  } catch (error) {
+    el("start-hint").className = "hint bad";
+    el("start-hint").textContent = error.message;
+  } finally {
+    updateControls();
+  }
+}
+
+async function refreshRuns() {
+  let payload;
+  try {
+    payload = await api("/api/runs");
+  } catch (_) {
+    return;
+  }
+  const select = el("f-runs");
+  const runs = payload.runs || [];
+  select.innerHTML = '<option value="">- pick a run -</option>' + runs.map((run) => {
+    const label = `${run.run_id}  ${run.status}${run.events ? " · " + run.events + " ev" : ""}  ${truncate(run.prompt || "", 46)}`;
+    return `<option value="${esc(run.run_id)}"${run.run_id === state.runId ? " selected" : ""}>${esc(label)}</option>`;
+  }).join("");
+}
+
+function attachRun(runId) {
+  resetRun(runId);
+  connect(runId, 0);
+  const url = new URL(location.href);
+  url.searchParams.set("run", runId);
+  history.replaceState(null, "", url);
+  loadStaged();
+}
+
+function resetRun(runId) {
+  closeStream();
+  state.runId = runId;
+  state.highestSeq = 0;
+  state.backoff = 1000;
+  state.finished = false;
+  state.status = null;
+  state.round = null;
+  state.rounds = null;
+  state.usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, calls: 0 };
+  state.roundOutput = 0;
+  state.teams = new Map();
+  state.candidates = new Map();
+  state.elo = [];
+  state.pairwise = [];
+  state.rules = [];
+  state.staged = [];
+  state.selected = null;
+  state.openTools = new Set();
+  state.detailMediaKey = "";
+  state.feedCount = 0;
+  el("feed").innerHTML = "";
+  el("detail-media").innerHTML = "";
+  el("run-label").textContent = runId;
+  renderAll();
+}
+
+// ---------------------------------------------------------------------------
+// SSE: replay then tail, with resumable reconnects
+// ---------------------------------------------------------------------------
+
+function closeStream() {
+  if (state.es) {
+    state.es.close();
+    state.es = null;
+  }
+}
+
+function setStreamState(name, detail) {
+  state.streamState = name;
+  const chip = el("chip-stream");
+  const classes = { live: "live", replaying: "live", reconnecting: "warn", closed: "ok", error: "bad", idle: "" };
+  chip.className = "chip " + (classes[name] || "");
+  chip.innerHTML = '<i class="dot"></i>' + esc(detail || name);
+}
+
+function connect(runId, fromSeq) {
+  closeStream();
+  setStreamState("replaying", fromSeq ? `resuming at ${fromSeq}` : "connecting");
+
+  const source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events?from_seq=${fromSeq | 0}`);
+  state.es = source;
+
+  source.onopen = () => {
+    state.backoff = 1000;
+    setStreamState("live", "live");
+  };
+
+  source.onmessage = (message) => {
+    state.backoff = 1000;
+    let event;
+    try {
+      event = JSON.parse(message.data);
+    } catch (_) {
+      return;
+    }
+    applyEvent(event);
+    scheduleRender();
+  };
+
+  // Sent by the server when the log has reached a terminal event. Closing here
+  // is what stops EventSource from politely reconnecting to a finished run.
+  source.addEventListener("end", () => {
+    state.finished = true;
+    closeStream();
+    setStreamState("closed", "run over");
+    updateControls();
+    refreshRuns();
+    loadStaged();
+  });
+
+  source.addEventListener("error", (message) => {
+    let detail = "stream error";
+    try { detail = JSON.parse(message.data).message || detail; } catch (_) { /* keep default */ }
+    setStreamState("error", truncate(detail, 40));
+  });
+
+  source.onerror = () => {
+    closeStream();
+    if (state.finished) return;
+    const wait = state.backoff;
+    setStreamState("reconnecting", `reconnecting in ${Math.round(wait / 1000)}s`);
+    state.backoff = Math.min(wait * 2, 10000);
+    // from_seq is the resume token: everything above it is replayed, everything
+    // at or below it is not, so a drop costs nothing and duplicates nothing.
+    setTimeout(() => {
+      if (!state.finished && state.runId === runId) connect(runId, state.highestSeq);
+    }, wait);
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Event application
+// ---------------------------------------------------------------------------
+
+function lane(team) {
+  if (!team) team = "unknown";
+  if (!state.teams.has(team)) {
+    state.teams.set(team, { name: team, status: "idle", say: "", tools: [], gate: null, note: "", round: null });
+  }
+  return state.teams.get(team);
+}
+
+function candidateKey(event) {
+  const data = event.data || {};
+  return String(pick(data, "candidate_id", "candidate", "cid") || event.team || pick(data, "team") || "unknown");
+}
+
+function candidate(event) {
+  const key = candidateKey(event);
+  if (!state.candidates.has(key)) {
+    state.candidates.set(key, {
+      id: key, team: null, isReference: false, round: null,
+      media: { roll: null, audio: null, midi: null, program: null, extras: [] },
+      verdicts: new Map(),
+    });
+  }
+  const entry = state.candidates.get(key);
+  const data = event.data || {};
+  const team = pick(data, "team") || event.team;
+  if (team) entry.team = team;
+  const reference = pick(data, "is_reference", "reference");
+  if (reference === true || team === "reference" || key === "reference") entry.isReference = true;
+  if (num(event.round) !== null) entry.round = event.round;
+  return entry;
+}
+
+const AUDIO_EXT = /\.(oga|ogg|opus|flac|wav|mp3)$/i;
+
+function absorbArtifacts(entry, data) {
+  const seen = [];
+  const walk = (value, depth) => {
+    if (depth > 3) return;
+    if (typeof value === "string") { seen.push(value); return; }
+    if (Array.isArray(value)) { value.forEach((item) => walk(item, depth + 1)); return; }
+    if (value && typeof value === "object") { Object.values(value).forEach((item) => walk(item, depth + 1)); }
+  };
+  walk(data, 0);
+  for (const raw of seen) {
+    if (!/\.[A-Za-z0-9]{2,5}$/.test(raw)) continue;
+    if (/\.png$/i.test(raw)) entry.media.roll = raw;
+    else if (AUDIO_EXT.test(raw)) entry.media.audio = raw;
+    else if (/\.midi?$/i.test(raw)) entry.media.midi = raw;
+    else if (/\.py$/i.test(raw)) entry.media.program = raw;
+    else if (/\.(json|txt|md)$/i.test(raw) && !entry.media.extras.includes(raw)) entry.media.extras.push(raw);
+  }
+}
+
+function applyEvent(event) {
+  if (typeof event.seq === "number") {
+    if (event.seq <= state.highestSeq) return;   // replay overlap after a reconnect
+    state.highestSeq = event.seq;
+  }
+
+  if (event.usage) accumulateUsage(event.usage);
+  appendFeed(event);
+
+  const data = event.data || {};
+  const kind = String(event.kind || "");
+
+  switch (kind) {
+    case "run.started":
+      state.status = "running";
+      if (num(pick(data, "rounds")) !== null) state.rounds = pick(data, "rounds");
+      if (pick(data, "prompt") && !el("f-prompt").value.trim()) el("f-prompt").value = pick(data, "prompt");
+      break;
+
+    case "run.finished": state.status = "finished"; state.finished = true; break;
+    case "run.failed": state.status = "failed"; state.finished = true; break;
+    case "run.budget_exceeded": state.status = "budget_exceeded"; state.finished = true; break;
+
+    case "round.started":
+      state.round = num(event.round) !== null ? event.round : pick(data, "round");
+      state.roundOutput = 0;
+      for (const entry of state.teams.values()) { entry.status = "waiting"; entry.tools = []; entry.gate = null; entry.say = ""; }
+      break;
+
+    case "round.finished":
+      state.round = num(event.round) !== null ? event.round : state.round;
+      break;
+
+    case "analyst.started": case "analyst.finished":
+      break;
+
+    case "composer.started": {
+      const entry = lane(event.team);
+      entry.status = "working";
+      entry.round = event.round;
+      entry.say = event.message || "started";
+      entry.gate = null;
+      break;
+    }
+    case "composer.thinking": {
+      const entry = lane(event.team);
+      entry.status = "thinking";
+      entry.say = event.message || oneLine(pick(data, "text", "summary")) || "thinking…";
+      break;
+    }
+    case "composer.tool_call": {
+      const entry = lane(event.team);
+      entry.status = "working";
+      entry.tools.push({
+        id: pick(data, "id", "tool_use_id", "call_id") || null,
+        name: pick(data, "tool", "name", "tool_name") || "tool",
+        input: pick(data, "input", "args", "arguments", "params"),
+        ts: event.ts,
+        state: "pending",
+        result: null,
+      });
+      if (entry.tools.length > 60) entry.tools.splice(0, entry.tools.length - 60);
+      break;
+    }
+    case "composer.tool_result": {
+      const entry = lane(event.team);
+      const id = pick(data, "id", "tool_use_id", "call_id");
+      const name = pick(data, "tool", "name", "tool_name");
+      let target = null;
+      for (let i = entry.tools.length - 1; i >= 0; i -= 1) {
+        const tool = entry.tools[i];
+        if (id && tool.id && tool.id === id) { target = tool; break; }
+        if (!target && tool.state === "pending" && (!name || tool.name === name)) target = tool;
+      }
+      if (!target) {
+        target = { id: id || null, name: name || "tool", input: undefined, ts: event.ts, state: "pending", result: null };
+        entry.tools.push(target);
+      }
+      const error = pick(data, "error", "stderr");
+      const ok = pick(data, "ok", "success");
+      target.state = (ok === false || error) ? "fail" : "ok";
+      target.result = pick(data, "result", "output", "summary", "stdout") || error || event.message || "";
+      break;
+    }
+    case "composer.finished": {
+      const entry = lane(event.team);
+      entry.status = "finished";
+      entry.say = event.message || "finished";
+      break;
+    }
+    case "composer.failed": {
+      const entry = lane(event.team);
+      entry.status = "failed";
+      entry.note = event.message || oneLine(pick(data, "error")) || "failed";
+      break;
+    }
+
+    case "gate.passed": {
+      const entry = lane(event.team);
+      entry.gate = { ok: true, message: event.message || "gate passed" };
+      break;
+    }
+    case "gate.rejected": {
+      const entry = lane(event.team);
+      const reasons = pick(data, "reasons", "errors", "problems");
+      entry.gate = {
+        ok: false,
+        message: event.message || "gate rejected",
+        reasons: Array.isArray(reasons) ? reasons.map(oneLine) : (reasons ? [oneLine(reasons)] : []),
+      };
+      break;
+    }
+
+    case "artifact.rendered": {
+      const entry = candidate(event);
+      absorbArtifacts(entry, data);
+      if (event.team) {
+        const laneEntry = lane(event.team);
+        laneEntry.note = "rendered " + entry.id;
+      }
+      if (!state.selected) state.selected = entry.id;
+      break;
+    }
+
+    case "judge.started":
+      break;
+
+    case "judge.verdict": {
+      const entry = candidate(event);
+      const dimension = event.dimension || pick(data, "dimension") || "unknown";
+      const samples = pick(data, "samples");
+      entry.verdicts.set(dimension, {
+        dimension: dimension,
+        score: num(pick(data, "score")),
+        rationale: pick(data, "rationale", "reason") || "",
+        samples: Array.isArray(samples) ? samples.filter((value) => num(value) !== null) : [],
+        spread: num(pick(data, "spread")),
+        findings: Array.isArray(pick(data, "findings")) ? pick(data, "findings") : [],
+      });
+      if (!state.selected) state.selected = entry.id;
+      break;
+    }
+
+    case "judge.failed":
+      break;
+
+    case "pairwise.verdict": {
+      state.pairwise.unshift({
+        a: pick(data, "a", "candidate_a", "left") || "?",
+        b: pick(data, "b", "candidate_b", "right") || "?",
+        winner: pick(data, "winner") || "?",
+        reason: pick(data, "reason", "rationale") || event.message || "",
+        round: event.round,
+      });
+      if (state.pairwise.length > 12) state.pairwise.length = 12;
+      break;
+    }
+
+    case "elo.updated":
+      state.elo = parseElo(data, event);
+      break;
+
+    case "coach.rule_written":
+      state.rules.push({
+        role: pick(data, "role", "attributed_role") || event.team || "-",
+        rule: pick(data, "rule") || event.message || "",
+        because: pick(data, "because", "reason") || "",
+        round: event.round,
+      });
+      break;
+
+    case "coach.library_staged": {
+      const name = pick(data, "name", "function", "function_name") || "unnamed";
+      if (!state.staged.some((item) => item.name === name)) {
+        state.staged.push({
+          name: name,
+          rationale: pick(data, "rationale") || event.message || "",
+          source: pick(data, "source") || "",
+          test_source: pick(data, "test_source") || "",
+          approved: false,
+          pending: true,
+        });
+      }
+      // The event carries what the coach wrote; the endpoint carries approval
+      // state, which can change without an event. Ask it.
+      loadStaged();
+      break;
+    }
+
+    default:
+      // Unknown kinds are already in the raw feed and the usage totals. That is
+      // the entire handling they need; a new event kind must never blank a page.
+      break;
+  }
+
+  if (state.finished) updateControls();
+}
+
+function accumulateUsage(usage) {
+  const add = (key) => {
+    const value = num(usage[key]);
+    if (value !== null) state.usage[key] += value;
+  };
+  add("input_tokens");
+  add("output_tokens");
+  add("cache_creation_input_tokens");
+  add("cache_read_input_tokens");
+  state.usage.calls += 1;
+  const output = num(usage.output_tokens);
+  if (output !== null) state.roundOutput += output;
+}
+
+function parseElo(data, event) {
+  const rows = [];
+  const push = (name, elo, delta, reference, games) => {
+    if (!name) return;
+    rows.push({
+      name: String(name),
+      elo: num(elo),
+      delta: num(delta),
+      reference: reference === true || String(name).toLowerCase() === "reference",
+      games: num(games),
+    });
+  };
+
+  const table = pick(data, "ratings", "standings", "elo", "teams", "table", "leaderboard");
+  if (Array.isArray(table)) {
+    for (const row of table) {
+      if (row && typeof row === "object") {
+        push(pick(row, "team", "name", "candidate_id", "id"), pick(row, "elo", "rating", "score"),
+             pick(row, "delta", "change"), pick(row, "is_reference", "reference"), pick(row, "games", "n"));
+      }
+    }
+  } else if (table && typeof table === "object") {
+    for (const [name, value] of Object.entries(table)) {
+      if (value && typeof value === "object") {
+        push(name, pick(value, "elo", "rating", "score"), pick(value, "delta", "change"),
+             pick(value, "is_reference", "reference"), pick(value, "games", "n"));
+      } else {
+        push(name, value, null, null, null);
+      }
+    }
+  } else if (pick(data, "team") || event.team) {
+    push(pick(data, "team") || event.team, pick(data, "elo", "rating"), pick(data, "delta"), pick(data, "is_reference"), null);
+  }
+
+  rows.sort((a, b) => (b.elo || 0) - (a.elo || 0));
+  return rows.length ? rows : state.elo;
+}
+
+// ---------------------------------------------------------------------------
+// Staged functions
+// ---------------------------------------------------------------------------
+
+async function loadStaged() {
+  if (!state.runId) return;
+  try {
+    const payload = await api(`/api/runs/${encodeURIComponent(state.runId)}/staged`);
+    if (Array.isArray(payload.staged) && payload.staged.length) state.staged = payload.staged;
+    renderStaged();
+  } catch (_) {
+    // A run directory without staged/ is the normal case, not an error.
+  }
+}
+
+async function approveStaged(name) {
+  try {
+    await api(`/api/runs/${encodeURIComponent(state.runId)}/staged/${encodeURIComponent(name)}/approve`, { method: "POST" });
+    await loadStaged();
+  } catch (error) {
+    alert("Could not approve " + name + ": " + error.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    renderAll();
+  });
+}
+
+function renderAll() {
+  renderUsage();
+  renderHeaderChips();
+  renderLanes();
+  renderJudges();
+  renderElo();
+  renderRules();
+  renderStaged();
+  renderDetail();
+  updateControls();
+}
+
+function renderHeaderChips() {
+  const chip = el("chip-round");
+  const round = state.round;
+  const total = state.rounds;
+  chip.textContent = round == null
+    ? (state.status ? "status " + state.status : "round -")
+    : `round ${round}${total ? " / " + total : ""}${state.status ? " · " + state.status : ""}`;
+  chip.className = "chip " + (state.status === "failed" || state.status === "budget_exceeded" ? "bad" : state.status === "finished" ? "ok" : "");
+}
+
+function renderUsage() {
+  const usage = state.usage;
+  const pricing = (state.config && state.config.pricing) || { known: false };
+  const total = usage.input_tokens + usage.output_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
+
+  let cost = null;
+  if (pricing.known) {
+    cost = (usage.input_tokens * pricing.input_per_mtok
+          + usage.output_tokens * pricing.output_per_mtok
+          + usage.cache_creation_input_tokens * pricing.cache_write_per_mtok
+          + usage.cache_read_input_tokens * pricing.cache_read_per_mtok) / 1e6;
+  }
+
+  const budget = (state.config && state.config.round_token_budget) || 0;
+  const share = budget ? Math.min(1, state.roundOutput / budget) : 0;
+
+  const tile = (key, value, cls) =>
+    `<div class="tile ${cls || ""}"><div class="k">${esc(key)}</div><div class="v">${esc(value)}</div></div>`;
+
+  el("usage").innerHTML =
+    tile("input", fmt(usage.input_tokens)) +
+    tile("output", fmt(usage.output_tokens)) +
+    tile("cache read", fmt(usage.cache_read_input_tokens)) +
+    tile("cache write", fmt(usage.cache_creation_input_tokens)) +
+    tile("all tokens", fmt(total)) +
+    tile("llm calls", fmt(usage.calls)) +
+    tile("est. cost", cost === null ? "n/a" : "$" + cost.toFixed(cost < 1 ? 4 : 2), "cost") +
+    `<div class="tile budget">
+       <div class="k">round output / budget</div>
+       <div class="v">${fmt(state.roundOutput)}<span class="spread"> / ${fmt(budget)}</span></div>
+       <div class="bar${share > 0.85 ? " hot" : ""}"><i style="width:${(share * 100).toFixed(1)}%"></i></div>
+     </div>`;
+
+  el("usage").title = pricing.known
+    ? `Rates per million tokens: input $${pricing.input_per_mtok}, output $${pricing.output_per_mtok}, ` +
+      `cache write $${pricing.cache_write_per_mtok}, cache read $${pricing.cache_read_per_mtok}. Estimate only.`
+    : "No published rates for this model, so no cost estimate is shown.";
+}
+
+const LANE_CLASS = { working: "live", thinking: "live", finished: "ok", failed: "bad", waiting: "", idle: "" };
+
+function renderLanes() {
+  const container = el("lanes");
+  if (!state.teams.size) {
+    container.innerHTML = '<div class="empty">Waiting for composer.started.</div>';
+    return;
+  }
+  const teams = [...state.teams.values()].sort((a, b) => a.name.localeCompare(b.name));
+  container.innerHTML = teams.map((entry) => {
+    const tools = entry.tools.slice(-24).map((tool, index) => {
+      const key = entry.name + ":" + (entry.tools.length - Math.min(entry.tools.length, 24) + index);
+      const open = state.openTools.has(key);
+      const body = open
+        ? `<div class="tool-detail"><pre>${esc(truncate(pretty(tool.input), 1600))}${
+             tool.result ? "\n\n→ " + esc(truncate(oneLine(tool.result), 800)) : ""}</pre></div>`
+        : "";
+      return `<div class="tool ${tool.state}" data-tool="${esc(key)}">
+                <i class="sd"></i>
+                <span><span class="tn">${esc(tool.name)}</span> <span class="ta">${esc(truncate(oneLine(tool.input), 64))}</span></span>
+                <span class="tt">${esc(clockOf(tool.ts))}</span>
+              </div>${body}`;
+    }).join("");
+
+    const gate = entry.gate
+      ? `<span class="chip ${entry.gate.ok ? "ok" : "bad"}">${entry.gate.ok ? "gate passed" : "gate rejected"}</span>` +
+        (entry.gate.reasons && entry.gate.reasons.length
+          ? `<div class="hint bad">${esc(truncate(entry.gate.reasons.join(" · "), 220))}</div>` : "")
+      : "";
+
+    return `<div class="lane">
+      <div class="top">
+        <span class="name">${esc(entry.name)}</span>
+        <span class="chip ${LANE_CLASS[entry.status] || ""}"><i class="dot"></i>${esc(entry.status)}</span>
+        <span class="hint">${entry.tools.length} tool call${entry.tools.length === 1 ? "" : "s"}</span>
+      </div>
+      <div class="say">${esc(truncate(entry.say, 220))}</div>
+      <div class="tools">${tools || '<div class="empty" style="padding-left:11px">no tool calls yet</div>'}</div>
+      <div class="foot">${gate || `<span class="hint">${esc(truncate(entry.note, 160)) || "&nbsp;"}</span>`}</div>
+    </div>`;
+  }).join("");
+
+  container.querySelectorAll(".tool").forEach((node) => {
+    node.addEventListener("click", () => {
+      const key = node.getAttribute("data-tool");
+      if (state.openTools.has(key)) state.openTools.delete(key); else state.openTools.add(key);
+      renderLanes();
+    });
+  });
+}
+
+function candidateOrder() {
+  return [...state.candidates.values()].sort((a, b) => {
+    if (a.isReference !== b.isReference) return a.isReference ? 1 : -1;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+function renderJudges() {
+  const container = el("judge-grid");
+  const candidates = candidateOrder();
+  const dimensions = (state.config && state.config.dimensions) || [];
+  if (!candidates.length || !dimensions.length) {
+    container.innerHTML = '<div class="empty">No verdicts yet.</div>';
+    el("judge-hint").textContent = "";
+    return;
+  }
+
+  const head = candidates.map((entry) => {
+    const label = entry.isReference ? `${entry.id} (reference)` : `${entry.id}${entry.team ? " · " + entry.team : ""}`;
+    const selected = state.selected === entry.id ? " sel" : "";
+    return `<th class="cand${selected}" data-cand="${esc(entry.id)}">${esc(label)}</th>`;
+  }).join("");
+
+  let filled = 0;
+  const rows = dimensions.map((dimension) => {
+    const cells = candidates.map((entry) => {
+      const verdict = entry.verdicts.get(dimension.key);
+      const selected = state.selected === entry.id ? " sel" : "";
+      if (!verdict || verdict.score == null) return `<td class="${selected.trim()}"><span class="spread">-</span></td>`;
+      filled += 1;
+      const spread = verdict.spread != null
+        ? verdict.spread
+        : (verdict.samples.length > 1 ? Math.max(...verdict.samples) - Math.min(...verdict.samples) : null);
+      const samples = verdict.samples.length > 1 ? ` samples ${verdict.samples.join(",")}` : "";
+      return `<td class="${selected.trim()}" data-cand="${esc(entry.id)}" title="${esc(truncate(verdict.rationale, 400))}${esc(samples)}">
+        <span class="cell">
+          <span class="score" style="background:${scoreColor(verdict.score)}">${esc(verdict.score)}</span>
+          ${spread ? `<span class="spread">±${esc(spread)}</span>` : ""}
+          ${verdict.findings.length ? `<span class="spread">${verdict.findings.length}f</span>` : ""}
+        </span></td>`;
+    }).join("");
+    return `<tr><td class="dim">${esc(dimension.title)}</td>${cells}</tr>`;
+  }).join("");
+
+  container.innerHTML = `<table><thead><tr><th>dimension</th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+  el("judge-hint").textContent = `${filled} of ${dimensions.length * candidates.length} cells`;
+
+  container.querySelectorAll("[data-cand]").forEach((node) => {
+    node.addEventListener("click", () => select(node.getAttribute("data-cand")));
+  });
+}
+
+function renderElo() {
+  const container = el("elo");
+  if (!state.elo.length) {
+    container.innerHTML = '<div class="empty">No ratings yet.</div>';
+  } else {
+    const rows = state.elo.map((row, index) => {
+      const delta = row.delta == null ? "" :
+        `<span class="delta ${row.delta >= 0 ? "up" : "down"}">${row.delta >= 0 ? "+" : ""}${row.delta.toFixed(1)}</span>`;
+      return `<tr class="${row.reference ? "reference" : ""}">
+        <td>${row.reference ? "-" : index + 1}</td>
+        <td>${esc(row.name)} ${row.reference ? '<span class="pin">pinned</span>' : ""}</td>
+        <td>${row.elo == null ? "-" : row.elo.toFixed(1)}</td>
+        <td>${delta}</td>
+        <td>${row.games == null ? "" : row.games}</td>
+      </tr>`;
+    }).join("");
+    container.innerHTML = `<table><thead><tr><th>#</th><th>entrant</th><th>elo</th><th>Δ</th><th>games</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
+  el("pairwise").innerHTML = state.pairwise.length
+    ? `<h3 style="margin:14px 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-faint)">recent pairwise</h3>` +
+      state.pairwise.map((verdict) => `<div class="rule" style="border-color:var(--ref)">
+        <div class="mono" style="font-size:11px">${esc(verdict.a)} vs ${esc(verdict.b)} → <b>${esc(verdict.winner)}</b></div>
+        <div class="because">${esc(truncate(verdict.reason, 260))}</div>
+      </div>`).join("")
+    : "";
+}
+
+function renderRules() {
+  const container = el("rules");
+  if (!state.rules.length) {
+    container.innerHTML = '<div class="empty">No rules written yet.</div>';
+    return;
+  }
+  container.innerHTML = state.rules.slice().reverse().map((rule) => `<div class="rule">
+    <div class="role">${esc(rule.role)}${rule.round != null ? " · round " + esc(rule.round) : ""}</div>
+    <div>${esc(rule.rule)}</div>
+    ${rule.because ? `<div class="because">because ${esc(rule.because)}</div>` : ""}
+  </div>`).join("");
+}
+
+function renderStaged() {
+  const container = el("staged");
+  if (!state.staged.length) {
+    container.innerHTML = '<div class="empty">Nothing staged.</div>';
+    return;
+  }
+  container.innerHTML = state.staged.map((item) => `<div class="staged">
+    <div class="row">
+      <div>
+        <div class="mono"><b>${esc(item.name)}</b> ${item.approved ? '<span class="chip ok">approved</span>' : '<span class="chip warn">awaiting review</span>'}</div>
+        <div class="hint">${esc(item.rationale || "no rationale recorded")}</div>
+      </div>
+      <button type="button" data-approve="${esc(item.name)}" ${item.approved ? "disabled" : ""}>Approve</button>
+    </div>
+    ${item.source ? `<pre>${esc(item.source)}</pre>` : ""}
+    ${item.test_source ? `<pre>${esc(item.test_source)}</pre>` : ""}
+  </div>`).join("");
+
+  container.querySelectorAll("[data-approve]").forEach((node) => {
+    node.addEventListener("click", () => approveStaged(node.getAttribute("data-approve")));
+  });
+}
+
+function select(id) {
+  state.selected = id;
+  renderJudges();
+  renderDetail();
+}
+
+function anchorOf(finding) {
+  const start = num(finding.bar_start);
+  const end = num(finding.bar_end);
+  let span;
+  if (start !== null && end !== null) span = start === end ? `bar ${start}` : `bars ${start}-${end}`;
+  else if (start !== null) span = `bar ${start}`;
+  else span = "whole piece";
+  return finding.track ? `${span}, ${finding.track}` : span;
+}
+
+function renderDetail() {
+  const entry = state.selected ? state.candidates.get(state.selected) : null;
+  const media = el("detail-media");
+  const body = el("detail-body");
+
+  if (!entry) {
+    if (state.detailMediaKey !== "") { media.innerHTML = ""; state.detailMediaKey = ""; }
+    body.innerHTML = '<div class="empty">Nothing selected. Click a candidate column in the judge panel.</div>';
+    el("detail-hint").textContent = "click a candidate column or a score";
+    return;
+  }
+
+  // Rebuilt only when the media actually changes: blowing this away on every
+  // event would restart the audio element mid-listen.
+  const key = [entry.id, entry.media.roll, entry.media.audio, entry.media.midi, entry.media.program].join("|");
+  if (key !== state.detailMediaKey) {
+    state.detailMediaKey = key;
+    const rollUrl = fileUrl(entry.media.roll);
+    const audioUrl = fileUrl(entry.media.audio);
+    const links = [
+      entry.media.program ? `<a href="${fileUrl(entry.media.program)}" target="_blank" rel="noreferrer">program.py</a>` : null,
+      entry.media.midi ? `<a href="${fileUrl(entry.media.midi)}" target="_blank" rel="noreferrer">MIDI</a>` : null,
+      ...entry.media.extras.map((path) => `<a href="${fileUrl(path)}" target="_blank" rel="noreferrer">${esc(path.split("/").pop())}</a>`),
+    ].filter(Boolean);
+
+    media.innerHTML = `<div class="detail-media">
+      <div>${rollUrl
+        ? `<a href="${rollUrl}" target="_blank" rel="noreferrer"><img src="${rollUrl}" alt="piano roll for ${esc(entry.id)}"></a>`
+        : '<div class="empty">No piano roll rendered yet.</div>'}</div>
+      <div>
+        <div class="row" style="gap:6px;margin-bottom:8px">
+          <span class="chip ${entry.isReference ? "warn" : "live"}"><i class="dot"></i>${esc(entry.id)}</span>
+          ${entry.team ? `<span class="chip">${esc(entry.team)}</span>` : ""}
+          ${entry.round != null ? `<span class="chip">round ${esc(entry.round)}</span>` : ""}
+          ${entry.isReference ? '<span class="pin">reference</span>' : ""}
+        </div>
+        ${audioUrl ? `<audio controls preload="none" src="${audioUrl}"></audio>`
+                   : '<div class="hint">No audio rendered yet.</div>'}
+        <div class="row" style="margin-top:10px">${links.join(" · ") || '<span class="hint">no files yet</span>'}</div>
+      </div>
+    </div>`;
+  }
+
+  const dimensions = (state.config && state.config.dimensions) || [];
+  const scores = [...entry.verdicts.values()].map((verdict) => verdict.score).filter((score) => score != null);
+  const mean = scores.length ? (scores.reduce((a, b) => a + b, 0) / scores.length) : null;
+  el("detail-hint").textContent = mean === null
+    ? `${entry.id} · no scores yet`
+    : `${entry.id} · mean ${mean.toFixed(2)} across ${scores.length} dimension${scores.length === 1 ? "" : "s"}`;
+
+  const blocks = dimensions.map((dimension) => {
+    const verdict = entry.verdicts.get(dimension.key);
+    if (!verdict) return "";
+    const spread = verdict.spread != null
+      ? verdict.spread
+      : (verdict.samples.length > 1 ? Math.max(...verdict.samples) - Math.min(...verdict.samples) : null);
+    const findings = verdict.findings.map((finding) => `<div class="finding">
+      <div class="row" style="gap:8px">
+        <span class="anchor">${esc(anchorOf(finding))}</span>
+        <span class="sev ${esc(String(finding.severity || "minor"))}">${esc(finding.severity || "minor")}</span>
+        ${finding.attributed_role ? `<span class="chip">${esc(finding.attributed_role)}</span>` : ""}
+      </div>
+      <div>${esc(finding.claim || "")}</div>
+      ${finding.suggested_revision ? `<div class="fix">→ ${esc(finding.suggested_revision)}</div>` : ""}
+    </div>`).join("");
+
+    return `<div class="dimblock">
+      <div class="row" style="gap:8px">
+        <span class="score" style="background:${scoreColor(verdict.score)}">${esc(verdict.score == null ? "-" : verdict.score)}</span>
+        <b>${esc(dimension.title)}</b>
+        ${spread ? `<span class="spread">spread ±${esc(spread)}</span>` : ""}
+        ${verdict.samples.length > 1 ? `<span class="spread">samples ${esc(verdict.samples.join(", "))}</span>` : ""}
+      </div>
+      ${verdict.rationale ? `<div class="rationale">${esc(verdict.rationale)}</div>` : ""}
+      ${findings || '<div class="hint" style="margin-top:5px">no findings</div>'}
+    </div>`;
+  }).join("");
+
+  body.innerHTML = blocks || '<div class="empty">No verdicts for this candidate yet.</div>';
+}
+
+function appendFeed(event) {
+  const feed = el("feed");
+  const row = document.createElement("div");
+  row.className = "ev k-" + String(event.kind || "unknown").replace(/[^a-z0-9._]/gi, "");
+  const tags = [event.round != null ? "r" + event.round : null, event.team, event.dimension]
+    .filter(Boolean).join(" ");
+  const extra = event.data && Object.keys(event.data).length ? oneLine(event.data) : "";
+  row.innerHTML = `<span class="seq">${esc(event.seq)}</span>
+    <span><span class="kind">${esc(event.kind)}</span>${tags ? ` <span class="tag">[${esc(tags)}]</span>` : ""}
+    <span class="msg">${esc(truncate(event.message || extra, 220))}</span></span>`;
+  feed.appendChild(row);
+  state.feedCount += 1;
+  // A long run's log is unbounded; the DOM should not be.
+  while (feed.childElementCount > 600) feed.removeChild(feed.firstChild);
+  if (el("feed-panel").open) feed.scrollTop = feed.scrollHeight;
+}
+
+function updateControls() {
+  const busy = !!state.runId && !state.finished && (state.streamState === "live" || state.streamState === "replaying" || state.streamState === "reconnecting");
+  for (const id of ["f-prompt", "f-teams", "f-rounds", "f-reference", "f-key", "btn-start"]) {
+    const node = el(id);
+    if (node) node.disabled = busy;
+  }
+  el("btn-cancel").disabled = !busy;
+  el("lanes-hint").textContent = state.runId ? `run ${state.runId} · seq ${state.highestSeq}` : "";
+}
+
+boot();
+</script>
+</body>
+</html>

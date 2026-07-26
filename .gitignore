@@ -1,0 +1,49 @@
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Soundfonts are fetched, never committed. They are 40-150MB, and while both
+# default banks are MIT, a user may well drop a bank in here whose license does
+# not permit redistribution. See docs/soundfonts.md.
+soundfonts/
+*.sf2
+*.sf3
+
+# Run output: event logs, candidate programs, MIDI, audio, piano rolls. Large,
+# and every run produces a new one.
+runs/
+
+# Per-user configuration. Holds a soundfont path and model choices, and is the
+# one file a user might be tempted to put a credential in. Never committed.
+config.toml
+
+# Reference MIDI. Community transcriptions of copyrighted songs are derivative
+# works and cannot be redistributed, so only the directory's own README and
+# .gitkeep are tracked. See docs/references.md.
+references/*
+!references/README.md
+!references/.gitkeep
+
+# Playbooks are per-run learning state, not source.
+playbooks/
+
+# The coach's learned house-library functions are committed on purpose: the
+# whole point is that a capability persists. Nothing to ignore here, noted so
+# nobody adds it later by reflex.
+
+# Local scratch
+scratch/
+tmp/
+*.log
+
+# macOS
+.DS_Store
