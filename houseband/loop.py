@@ -113,9 +113,17 @@ def run(
     client=None,
     echo: bool = True,
     max_turns: int = 8,
+    model: str | None = None,
 ) -> Path:
-    """Execute a full run. Returns the run directory."""
+    """Execute a full run. Returns the run directory.
+
+    ``model`` overrides the configured default for this run only. Users spend
+    their own credential, so the choice between a cheaper and a stronger model
+    belongs to whoever is paying rather than to a constant in the source.
+    """
     config = config or cfg.load()
+    if model:
+        config.model = model
     run_id = run_id or new_run_id()
     run_dir = config.runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -471,10 +479,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reference", default=None, help="Filename in references/.")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--max-turns", type=int, default=8)
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=f"Override the model for this run (default {cfg.DEFAULT_MODEL}).",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
     config = cfg.load()
+    if args.model:
+        config.model = args.model
     if cfg.credential_source() is None:
         print(
             "No Anthropic credential found.\n"
@@ -496,6 +511,7 @@ def main(argv: list[str] | None = None) -> int:
         config=config,
         echo=not args.quiet,
         max_turns=args.max_turns,
+        model=args.model,
     )
     print(f"\nRun complete: {run_dir}")
     return 0

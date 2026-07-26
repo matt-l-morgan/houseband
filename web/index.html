@@ -223,6 +223,11 @@
       <div><label for="f-teams">Teams</label><input id="f-teams" type="number" min="1" max="8" value="3"></div>
       <div><label for="f-rounds">Rounds</label><input id="f-rounds" type="number" min="1" max="20" value="3"></div>
       <div><label for="f-reference">Reference MIDI</label><select id="f-reference"></select></div>
+      <div class="wide">
+        <label for="f-model">Model</label>
+        <select id="f-model"></select>
+        <div class="hint" id="model-note"></div>
+      </div>
       <div class="row" style="justify-content:flex-end">
         <button type="submit" class="primary" id="btn-start">Start run</button>
         <button type="button" class="danger" id="btn-cancel" disabled>Cancel</button>
@@ -300,6 +305,7 @@ const state = {
   rounds: null,
   usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, calls: 0 },
   roundOutput: 0,
+  runModel: null,     // the model this run is actually using
   teams: new Map(),        // team -> lane state
   candidates: new Map(),   // candidate id -> { team, isReference, round, media, verdicts }
   elo: [],
@@ -422,9 +428,47 @@ async function boot() {
   if (wanted) attachRun(wanted);
 }
 
+// Model catalogue from /api/config, kept module-level so the picker, the note,
+// and the cost readout all price from one source.
+let MODELS = [];
+
+function pricingFor(modelId) {
+  if (!modelId) return null;
+  const found = MODELS.find((m) => m.id === modelId);
+  if (!found) return null;
+  return {
+    known: true,
+    input_per_mtok: found.input_per_mtok,
+    output_per_mtok: found.output_per_mtok,
+    cache_write_per_mtok: found.input_per_mtok * 1.25,
+    cache_read_per_mtok: found.input_per_mtok * 0.1,
+  };
+}
+
+function showModelNote() {
+  const chosen = MODELS.find((m) => m.id === el("f-model").value);
+  el("model-note").textContent = chosen ? chosen.note : "";
+}
+
 function applyConfig(config) {
   const model = config.model || "unknown model";
   el("chip-model").textContent = "model " + model;
+
+  // Model choice belongs to whoever is paying, so the picker shows the actual
+  // per-million-token rates rather than making the user go and look them up.
+  MODELS = config.models || [];
+  const models = el("f-model");
+  if (MODELS.length) {
+    models.innerHTML = MODELS.map((m) => {
+      const price = `$${m.input_per_mtok}/$${m.output_per_mtok} per MTok`;
+      return `<option value="${esc(m.id)}"${m.default ? " selected" : ""}>` +
+        `${esc(m.id)} — ${esc(price)}</option>`;
+    }).join("");
+  } else {
+    models.innerHTML = `<option value="">${esc(model)}</option>`;
+  }
+  models.onchange = showModelNote;
+  showModelNote();
 
   const references = el("f-reference");
   references.innerHTML = '<option value="">none</option>' +
@@ -511,6 +555,7 @@ async function onStart(event) {
         teams: Number(el("f-teams").value) || 3,
         rounds: Number(el("f-rounds").value) || 3,
         reference: el("f-reference").value || null,
+        model: el("f-model").value || null,
       }),
     });
     hint.textContent = "started " + created.run_id;
@@ -574,6 +619,7 @@ function resetRun(runId) {
   state.rounds = null;
   state.usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, calls: 0 };
   state.roundOutput = 0;
+  state.runModel = null;
   state.teams = new Map();
   state.candidates = new Map();
   state.elo = [];
@@ -736,6 +782,9 @@ function applyEvent(event) {
   switch (kind) {
     case "run.started":
       state.status = "running";
+      // Taken from the event rather than the form, so a reattached or replayed
+      // run is priced by what it actually ran on.
+      if (pick(data, "model")) state.runModel = pick(data, "model");
       if (num(pick(data, "rounds")) !== null) state.rounds = pick(data, "rounds");
       if (pick(data, "prompt") && !el("f-prompt").value.trim()) el("f-prompt").value = pick(data, "prompt");
       break;
@@ -1033,7 +1082,9 @@ function renderHeaderChips() {
 
 function renderUsage() {
   const usage = state.usage;
-  const pricing = (state.config && state.config.pricing) || { known: false };
+  // Price against the model this run is actually using, not the server default.
+  // A user who picked Opus for one run should not read a Sonnet-priced total.
+  const pricing = pricingFor(state.runModel) || (state.config && state.config.pricing) || { known: false };
   const total = usage.input_tokens + usage.output_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
 
   let cost = null;

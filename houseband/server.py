@@ -145,6 +145,10 @@ class RunIn(BaseModel):
     teams: int = Field(default=3, ge=1, le=8)
     rounds: int = Field(default=3, ge=1, le=20)
     reference: str | None = None
+    # Omitted means the configured default. Validated against the known-pricing
+    # table rather than passed through, so a typo becomes a 400 here instead of a
+    # 404 from the API three minutes into a run.
+    model: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +313,36 @@ def get_config() -> dict[str, Any]:
         "dimensions": [{"key": key, "title": DIMENSION_TITLES.get(key, key)} for key in DIMENSIONS],
         "round_token_budget": config.round_token_budget,
         "pricing": _pricing(config.model),
+        "models": _model_choices(config.model),
     }
+
+
+# Ordered cheapest-first, with a one-line note on the tradeoff. A run makes a lot
+# of calls, so the price difference between tiers is the difference between
+# running this freely and rationing it, and that is worth putting in front of the
+# person paying rather than burying in a config file.
+_MODEL_NOTES: dict[str, str] = {
+    "claude-haiku-4-5": "Cheapest. Expect weak composition and unreliable judging.",
+    "claude-sonnet-5": "Default. Good balance for repeated runs.",
+    "claude-opus-4-8": "Stronger composition and judging, roughly 1.7x the cost.",
+    "claude-opus-5": "Best composition and judging. Use when a run matters.",
+    "claude-fable-5": "Most capable, and the most expensive by a wide margin.",
+}
+
+
+def _model_choices(current: str) -> list[dict[str, Any]]:
+    order = list(_MODEL_NOTES)
+    known = [m for m in order if m in _MODEL_PRICING]
+    return [
+        {
+            "id": name,
+            "note": _MODEL_NOTES[name],
+            "input_per_mtok": _MODEL_PRICING[name]["input"],
+            "output_per_mtok": _MODEL_PRICING[name]["output"],
+            "default": name == current,
+        }
+        for name in known
+    ]
 
 
 def _pricing(model: str) -> dict[str, Any]:
@@ -428,6 +461,7 @@ def create_run(body: RunIn) -> dict[str, Any]:
 
     config = cfg.load()
     reference = _validated_reference(body.reference, config.references_dir)
+    model = _validated_model(body.model) or config.model
 
     run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
     run_dir = _run_dir(run_id, must_exist=False)
@@ -444,15 +478,35 @@ def create_run(body: RunIn) -> dict[str, Any]:
                 "rounds": body.rounds,
                 "reference": reference,
                 "created": datetime.now(timezone.utc).isoformat(),
-                "model": config.model,
+                "model": model,
             },
             indent=2,
         ),
         encoding="utf-8",
     )
 
-    _launch(run_id, run_dir, prompt, body.teams, body.rounds, reference)
-    return {"run_id": run_id}
+    _launch(run_id, run_dir, prompt, body.teams, body.rounds, reference, model)
+    return {"run_id": run_id, "model": model}
+
+
+def _validated_model(model: str | None) -> str | None:
+    """Accept only a model we publish a price for.
+
+    Restrictive on purpose. The alternative is forwarding an arbitrary string to
+    the API and surfacing its 404 partway into a paid run, and an unpriced model
+    would also blank the cost readout the whole UI is built around.
+    """
+    if not model:
+        return None
+    name = model.strip()
+    if not name:
+        return None
+    if name not in _MODEL_PRICING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model {name!r}. Known: {', '.join(sorted(_MODEL_PRICING))}",
+        )
+    return name
 
 
 def _validated_reference(reference: str | None, references_dir: Path) -> str | None:
@@ -476,6 +530,7 @@ def _launch(
     teams: int,
     rounds: int,
     reference: str | None,
+    model: str | None = None,
 ) -> None:
     """Start the pipeline as a detached child, or record why we could not.
 
@@ -509,6 +564,8 @@ def _launch(
     ]
     if reference:
         command += ["--reference", reference]
+    if model:
+        command += ["--model", model]
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(

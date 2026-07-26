@@ -24,12 +24,22 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Model defaults. Kept in config rather than inline so that swapping models (or
 # later, providers) is a one-line change instead of a grep.
-DEFAULT_MODEL = "claude-opus-5"
+#
+# Sonnet 5 is the default because a run makes a lot of calls: three composers
+# iterating, then eight rubric dimensions per candidate with three of them
+# sampled three times, then a both-orders pairwise tournament, then coaching. At
+# Opus 5 rates ($5/$25 per MTok against Sonnet 5's $3/$15) a three-round run gets
+# expensive enough to discourage the repeated runs this system is supposed to
+# invite. Override with HOUSEBAND_MODEL or config.toml when a run matters more
+# than its cost.
+DEFAULT_MODEL = "claude-sonnet-5"
 COMPOSER_EFFORT = "xhigh"
 JUDGE_EFFORT = "high"
 
-# Opus 5 runs adaptive thinking by default and thinking counts against
-# max_tokens, so composers need real headroom or they truncate mid-program.
+# Both Sonnet 5 and the Opus 5 family run adaptive thinking by default, and
+# thinking counts against max_tokens, so composers need real headroom or they
+# truncate mid-program. Composer calls stream for that reason; judge calls stay
+# under the SDK's non-streaming duration guard (which trips around 21k).
 COMPOSER_MAX_TOKENS = 64_000
 JUDGE_MAX_TOKENS = 16_000
 
