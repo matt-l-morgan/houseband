@@ -82,14 +82,19 @@ Add whatever your host offers on top:
 ```bash
 docker run --rm -p 8000:8000 \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-  --read-only --tmpfs /tmp \
   -v "$PWD/runs:/app/runs" \
   --memory 2g --pids-limit 256 \
   --cap-drop ALL --security-opt no-new-privileges \
   houseband
 ```
 
-`--read-only` with a writable `runs/` mount is the shape that matches how the app works, and `--pids-limit` closes the fork-bomb that the wall-clock timeout does not.
+`--pids-limit` is the one worth adding deliberately: it closes the fork bomb, which the wall-clock timeout on `execute_program` does not.
+`--memory` bounds the other unbounded resource, since nothing stops a composer program from allocating until the host swaps.
+
+**`--read-only` is tempting and does not work here**, which is worth knowing before you try it.
+The library-evolution half of the learning loop writes to `houseband/house/learned.py`, and the coach writes to `playbooks/`, both inside `/app`.
+A fully read-only root filesystem disables the part of the system that converts feedback into capability.
+If you want it anyway, run with `--read-only --tmpfs /tmp` and mount writable volumes over `/app/runs`, `/app/playbooks` and `/app/houseband/house`, and accept that a learned function then lives in a volume rather than in a file you can commit.
 
 **Run it single-user.**
 There is no authentication, no authorization, and no per-user isolation in the server, deliberately: it is a local app that happens to be deployable.

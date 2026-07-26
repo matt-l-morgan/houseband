@@ -5,7 +5,7 @@
 # 3.14 locally, but a container build is where a missing wheel turns into a
 # from-source compile of numpy or matplotlib, and 3.13 has settled wheels for
 # everything here.
-FROM python:3.13-slim AS base
+FROM python:3.13-slim
 
 # PYTHONDONTWRITEBYTECODE: the app runs read-only-ish as a non-root user, so
 #   .pyc files would only ever be write attempts that fail or bloat layers.

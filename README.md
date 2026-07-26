@@ -100,16 +100,19 @@ These are deliberately separate jobs, because LLMs are much more consistent comp
 One call per dimension across eight dimensions, with structured output.
 Four properties carry nearly all the value:
 
-- **Schema-required evidence anchors.** Every finding must name a bar range or a track. This is the whole difference between actionable feedback and vibes.
+- **Schema-required evidence anchors.** Every finding must name a bar range or a track.
+  This is the whole difference between actionable feedback and vibes.
 - **Anchored scales, not "rate 1 to 10."** Each level has an explicit descriptor: *Form: 2 = one section repeated with no variation; 4 = two sections, contrast is dynamic only; 6 = clear ABAB with distinct material; 8 = multi-section arc with a bridge and a reduced section.* A bare 1-10 scale is a vibe with a number attached.
-- **Role attribution on every finding.** Each finding names which of `songwriter`, `rhythm`, `arranger`, `mix` is responsible, so the lesson routes to that role's section of the playbook. Without it every agent gets every critique and nobody sharpens.
+- **Role attribution on every finding.** Each finding names which of `songwriter`, `rhythm`, `arranger`, `mix` is responsible, so the lesson routes to that role's section of the playbook.
+  Without it every agent gets every critique and nobody sharpens.
 - **Blind and order-randomised.** Judges never learn which team produced which candidate, and the reference is indistinguishable from an agent's work.
 
 **The pairwise judge produces the leaderboard.**
 Head-to-head preference with justification, fed into Elo.
 Three corrections for known LLM-judge failure modes:
 
-- **Every pair runs in both presentation orders.** Position bias is real and large. A split verdict counts as a draw.
+- **Every pair runs in both presentation orders.** Position bias is real and large.
+  A split verdict counts as a draw.
 - **The reference's Elo is pinned** at a fixed anchor rating and never updates, so team ratings stay on an interpretable scale across rounds instead of drifting as a group.
 - **The reference is rubric-scored once and cached.** It never changes, so re-scoring it every round is pure spend.
 
@@ -138,12 +141,18 @@ See [`docs/references.md`](docs/references.md).
 Agents will learn to game LLM judges.
 These are cheap, so they exist from round one rather than being retrofitted after a run turns out to have been measuring nothing.
 
-- The blind reference anchor catches gross miscalibration. `judges/calibration.py` turns it into an explicit gate: the reference must beat every agent on the three structural dimensions (form and arrangement, melody, harmony and voice leading), and a run that fails emits a `JUDGE CALIBRATION SUSPECT` event rather than burying the fact in a report. Production and originality are excluded on purpose, because those are the two dimensions where an agent can legitimately win.
-- **One judge dimension is held out from the coach** each run, so it cannot be optimised against directly. Which dimension rotates per run, so none is permanently invisible to learning.
+- The blind reference anchor catches gross miscalibration.
+  `judges/calibration.py` turns it into an explicit gate: the reference must beat every agent on the three structural dimensions (form and arrangement, melody, harmony and voice leading), and a run that fails emits a `JUDGE CALIBRATION SUSPECT` event rather than burying the fact in a report.
+  Production and originality are excluded on purpose, because those are the two dimensions where an agent can legitimately win.
+- **One judge dimension is held out from the coach** each run, so it cannot be optimised against directly.
+  Which dimension rotates per run, so none is permanently invisible to learning.
 - **Median-of-3 sampling** on the dimensions that drive learning (form and arrangement, melody, rhythm and groove), because a single noisy score can teach the coach something untrue.
-- **The panel's own noise floor is measured and reported**, not assumed. `ScoredDimension.spread` is the observed disagreement between samples of the same candidate, and the calibration report carries the mean across dimensions. A dimension whose samples routinely disagree by three points cannot support a one-point conclusion, and that is exactly the number the coach needs before writing a rule.
+- **The panel's own noise floor is measured and reported**, not assumed.
+  `ScoredDimension.spread` is the observed disagreement between samples of the same candidate, and the calibration report carries the mean across dimensions.
+  A dimension whose samples routinely disagree by three points cannot support a one-point conclusion, and that is exactly the number the coach needs before writing a rule.
 - Pairwise order-swapping removes the position-bias exploit.
-- The honest check no code can do for you: listen to the round 1 winner and the round 3 winner back to back and ask whether the improvement is *audible*, not just numeric. If judge scores climb while your own preference stays flat, you are Goodharting and the run is not showing what you think it is.
+- The honest check no code can do for you: listen to the round 1 winner and the round 3 winner back to back and ask whether the improvement is *audible*, not just numeric.
+  If judge scores climb while your own preference stays flat, you are Goodharting and the run is not showing what you think it is.
 
 ### Playbooks are per-team, not per-role
 
