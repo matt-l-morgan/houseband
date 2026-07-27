@@ -70,7 +70,7 @@ There is no seccomp filter, no namespace, no resource limit beyond wall-clock ti
 **The threat model that is actually covered** is a model that writes wrong code: infinite loops, imports of things that are not there, attempts to fetch a sample library off the internet, writes to paths it should not.
 Those are what happen in practice and they are all handled.
 
-**The threat model that is not covered** is a model that has been made adversarial, whether by prompt injection through a reference file or a user-supplied brief, or by a supply-chain problem upstream of the weights.
+**The threat model that is not covered** is a model that has been made adversarial, whether by prompt injection through a user-supplied brief or by a supply-chain problem upstream of the weights.
 If that is your concern, the process boundary above is not enough and you should not rely on it.
 
 ## Deployment
@@ -101,9 +101,8 @@ There is no authentication, no authorization, and no per-user isolation in the s
 An instance on the public internet with your key configured is an open invitation to spend your money and to execute arbitrary Python inside your container.
 If you want to share it, put it behind whatever your platform offers for access control and treat every user as having shell access to the container.
 
-**Do not point it at untrusted references or briefs.**
-A reference MIDI is parsed and summarised into text that reaches a composer's prompt, and a user's brief goes straight there.
-Both are prompt-injection surfaces into an agent whose one tool executes Python.
+**Do not accept untrusted briefs.**
+A user's prompt goes almost verbatim into a composer's system prompt, which makes it a prompt-injection surface into an agent whose one tool executes Python.
 
 ## Credentials
 

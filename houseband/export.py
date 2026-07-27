@@ -11,14 +11,12 @@ Three things here are worth explaining, because each of them is a bug we would
 otherwise ship.
 
 **The tempo map is rebuilt from the sidecar, not read from the MIDI.**
-``Score.to_midi()`` passes only ``initial_tempo`` to pretty_midi, so a score
-written with ``tempo()`` or ``ramp_tempo()`` loses every tempo change on the way
-to disk. ``out.mid`` for ``examples/good_program.py`` declares a flat 68 BPM for a
-piece that ramps to 78: the note *seconds* are right, because the composer's
-tempo map was already baked into them, but the bar grid a DAW derives from that
-file is wrong, so the notes drift off the grid. The real map survives in
-``out.score.json``, so that is where we read it from, and every file this module
-writes carries it in full.
+``Score.write()`` emits the full map, but this module also has to read MIDI it did
+not write, and there the map can only be inferred from the
+file's own tempo changes under a guess at the bar length. ``out.score.json`` is
+the lossless record of what the composer actually declared, so that is where the
+map is read from whenever there is one, and every file this module writes carries
+it in full.
 
 **Note positions are computed in musical time, then converted once.**
 A note's seconds are turned into a fractional bar via :class:`TempoMap` and only

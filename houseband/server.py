@@ -48,6 +48,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from importlib.util import find_spec
 from pathlib import Path
@@ -55,11 +56,18 @@ from typing import Any, Iterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from houseband import config as cfg
 from houseband.events import Event, read_events, scrub, tail_events
-from houseband.types import DIMENSION_TITLES, DIMENSION_WEIGHTS, DIMENSIONS, ProducerFeedback
+from houseband.types import (
+    BAR_CHOICES,
+    BARS_DEFAULT,
+    DIMENSION_TITLES,
+    DIMENSION_WEIGHTS,
+    DIMENSIONS,
+    ProducerFeedback,
+)
 
 WEB_DIR = cfg.REPO_ROOT / "web"
 
@@ -85,6 +93,10 @@ FUNCTION_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 # no dots leading anywhere, so a candidate id can be pasted into a filename lookup
 # without a second traversal check having to save us.
 CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+# The ids the loop used to mint for the reference candidate, before references
+# were removed. Anchored so it cannot match a real candidate.
+LEGACY_REFERENCE_ID_RE = re.compile(r"^(?:r\d+)?ref$")
 
 # A producer's note is free text, but it lands in an append-only log that the
 # coach reads back into a prompt, so it gets a ceiling rather than being trusted
@@ -137,8 +149,10 @@ CONTENT_TYPES = {
 # started is a key they have lost track of.
 _CREDENTIAL: dict[str, str] = {}
 
-# run_id -> Popen. Only covers runs this process launched: a run started
-# elsewhere is still fully observable, just not cancellable from here.
+# run_id -> Popen, for runs this process launched. Not the authority on whether a
+# run is alive: see _process_alive, which also adopts a run from the pid recorded
+# in its directory, so a restart mid-run neither loses track of a live pipeline
+# nor takes away its Cancel button.
 _PROCESSES: dict[str, subprocess.Popen] = {}
 # Runs we signalled, so the watcher can say "cancelled" rather than reporting a
 # deliberate kill as a mysterious negative exit code.
@@ -166,7 +180,6 @@ class RunIn(BaseModel):
     prompt: str
     teams: int = Field(default=3, ge=1, le=8)
     rounds: int = Field(default=3, ge=1, le=20)
-    reference: str | None = None
     # Omitted means the configured default. Validated against the known-pricing
     # table rather than passed through, so a typo becomes a 400 here instead of a
     # 404 from the API three minutes into a run.
@@ -175,6 +188,20 @@ class RunIn(BaseModel):
     # stops a budget so small that no round can finish, and the ceiling stops a
     # fat-fingered extra zero from becoming a surprise bill.
     budget: int | None = Field(default=None, ge=20_000, le=20_000_000)
+    # Clip length in bars. Restricted to the three lengths the rubrics and the
+    # DAW-readiness check were written against, because an arbitrary bar count
+    # produces a clip that does not loop cleanly on a 4-bar phrase boundary and
+    # the loop-usability judge would be marking down our own arithmetic.
+    bars: int | None = None
+
+    @field_validator("bars")
+    @classmethod
+    def _known_length(cls, value: int | None) -> int | None:
+        if value is not None and value not in BAR_CHOICES:
+            raise ValueError(
+                f"bars must be one of {', '.join(str(b) for b in BAR_CHOICES)}"
+            )
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -290,10 +317,58 @@ def _terminal_event(run_dir: Path, lines: list[str] | None = None) -> Event | No
     return found
 
 
-def _process_alive(run_id: str) -> bool:
+def _recorded_pid(run_dir: Path) -> int | None:
+    try:
+        return int((run_dir / "child.pid").read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_is_this_run(pid: int, run_id: str) -> bool:
+    """Is that pid still the pipeline for this run, and not a recycled number?
+
+    Checked against the process's own command line rather than trusting the pid
+    alone. Pids are recycled, and signalling a stranger because a number came
+    back around is the one failure mode a cancel button must not have.
+    """
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    try:
+        listing = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Without corroboration, decline to claim it. A run wrongly reported as
+        # finished is recoverable by reloading; a signal sent to the wrong
+        # process is not.
+        return False
+    line = listing.stdout.strip()
+    return "houseband.loop" in line and run_id in line
+
+
+def _process_alive(run_id: str, run_dir: Path | None = None) -> bool:
+    """Is this run's pipeline still going?
+
+    Deliberately not just "did *this* server start it". The module's whole claim
+    is that the browser is optional and the log is the only shared state, which
+    means a run outlives the server that launched it and a page must be able to
+    attach to one this process has never seen. Reading liveness out of
+    ``_PROCESSES`` alone breaks that the moment the server restarts mid-run: the
+    run keeps composing and the UI calls it interrupted.
+    """
     with _PROCESS_LOCK:
         proc = _PROCESSES.get(run_id)
-    return proc is not None and proc.poll() is None
+    if proc is not None:
+        return proc.poll() is None
+    if run_dir is None:
+        return False
+    pid = _recorded_pid(run_dir)
+    return pid is not None and _pid_is_this_run(pid, run_id)
 
 
 def _status_of(run_dir: Path, last: Event | None, lines: list[str] | None = None) -> str:
@@ -301,12 +376,13 @@ def _status_of(run_dir: Path, last: Event | None, lines: list[str] | None = None
     terminal = _terminal_event(run_dir, lines)
     if terminal is not None:
         return STATUS_FOR_KIND[terminal.kind]
-    if _process_alive(run_dir.name):
+    if _process_alive(run_dir.name, run_dir):
         return "running"
     if last is None:
         return "starting" if (run_dir / "request.json").exists() else "empty"
     # Log stops mid-run with nothing running: either the child died without
-    # saying so, or this server was restarted while a run was in flight.
+    # saying so, or a server was restarted while a run was in flight and the
+    # child has since gone too.
     return "interrupted"
 
 
@@ -355,13 +431,6 @@ def index() -> FileResponse:
 def get_config() -> dict[str, Any]:
     config = cfg.load()
     source = _credential_source()
-    references: list[str] = []
-    if config.references_dir.is_dir():
-        references = sorted(
-            entry.name
-            for entry in config.references_dir.iterdir()
-            if entry.is_file() and entry.suffix.lower() in {".mid", ".midi"}
-        )
     return {
         "model": config.model,
         "soundfont": {
@@ -373,14 +442,39 @@ def get_config() -> dict[str, Any]:
             "path": config.fluidsynth,
         },
         "credential": {"configured": source is not None, "source": source},
-        "references": references,
         # Shipped from the contract rather than duplicated in the page, so the
         # judge grid cannot drift from houseband.types.
         "dimensions": [{"key": key, "title": DIMENSION_TITLES.get(key, key)} for key in DIMENSIONS],
         "round_token_budget": config.round_token_budget,
         "pricing": _pricing(config.model),
         "models": _model_choices(config.model),
+        # Clip lengths, with the seconds each works out to. Bars are what the
+        # composer and the DAW grid speak in, but a producer thinks in seconds,
+        # and the answer depends on tempo, so the page gets the range rather than
+        # a single number that would be wrong for two thirds of genres.
+        "lengths": _length_choices(),
     }
+
+
+def _length_choices() -> list[dict[str, Any]]:
+    # The same two tempi the composer prompt quotes, taken from config rather than
+    # restated, so the page and the instruction the composer reads cannot disagree
+    # about how long a clip is.
+    slow, fast = cfg.TEMPO_SLOW, cfg.TEMPO_FAST
+    choices = []
+    for bars in BAR_CHOICES:
+        profile = cfg.profile_for(bars)
+        choices.append(
+            {
+                "bars": bars,
+                "default": bars == BARS_DEFAULT,
+                "seconds_fast": round(profile.target_seconds(fast), 1),
+                "seconds_slow": round(profile.target_seconds(slow), 1),
+                "label": f"{bars} bars",
+                "note": profile.approx_seconds,
+            }
+        )
+    return choices
 
 
 # Ordered cheapest-first, with a one-line note on the tradeoff. A run makes a lot
@@ -496,11 +590,10 @@ def list_runs() -> dict[str, Any]:
                 "prompt": prompt or "",
                 "teams": request.get("teams"),
                 "rounds": request.get("rounds"),
-                "reference": request.get("reference"),
                 "last_kind": last.kind if last else None,
                 "last_ts": last.ts if last else None,
                 "events": last.seq if last else 0,
-                "live": _process_alive(entry.name),
+                "live": _process_alive(entry.name, entry),
             }
         )
     runs.sort(key=lambda run: run.get("created") or "", reverse=True)
@@ -529,9 +622,9 @@ def create_run(body: RunIn) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Empty prompt.")
 
     config = cfg.load()
-    reference = _validated_reference(body.reference, config.references_dir)
     model = _validated_model(body.model) or config.model
     budget = body.budget or config.round_token_budget
+    bars = body.bars or BARS_DEFAULT
 
     run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
     run_dir = _run_dir(run_id, must_exist=False)
@@ -546,18 +639,20 @@ def create_run(body: RunIn) -> dict[str, Any]:
                 "prompt": prompt,
                 "teams": body.teams,
                 "rounds": body.rounds,
-                "reference": reference,
                 "created": datetime.now(timezone.utc).isoformat(),
                 "model": model,
                 "budget": budget,
+                "bars": bars,
             },
             indent=2,
         ),
         encoding="utf-8",
     )
 
-    _launch(run_id, run_dir, prompt, body.teams, body.rounds, reference, model, budget)
-    return {"run_id": run_id, "model": model, "budget": budget}
+    _launch(
+        run_id, run_dir, prompt, body.teams, body.rounds, model, budget, bars
+    )
+    return {"run_id": run_id, "model": model, "budget": budget, "bars": bars}
 
 
 def _validated_model(model: str | None) -> str | None:
@@ -580,29 +675,15 @@ def _validated_model(model: str | None) -> str | None:
     return name
 
 
-def _validated_reference(reference: str | None, references_dir: Path) -> str | None:
-    """Accept only a plain filename that actually exists under references/."""
-    if not reference:
-        return None
-    name = reference.strip()
-    if not name:
-        return None
-    if Path(name).name != name or name.startswith("."):
-        raise HTTPException(status_code=400, detail="Reference must be a bare filename.")
-    if not (references_dir / name).is_file():
-        raise HTTPException(status_code=400, detail=f"No such reference: {name}")
-    return name
-
-
 def _launch(
     run_id: str,
     run_dir: Path,
     prompt: str,
     teams: int,
     rounds: int,
-    reference: str | None,
     model: str | None = None,
     budget: int | None = None,
+    bars: int | None = None,
 ) -> None:
     """Start the pipeline as a detached child, or record why we could not.
 
@@ -634,12 +715,12 @@ def _launch(
         "--rounds",
         str(rounds),
     ]
-    if reference:
-        command += ["--reference", reference]
     if model:
         command += ["--model", model]
     if budget:
         command += ["--budget", str(budget)]
+    if bars:
+        command += ["--bars", str(bars)]
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
@@ -684,6 +765,16 @@ def _launch(
         if not handle.closed:
             handle.close()
 
+    # Written so liveness and cancellation survive this server process. A run is
+    # a detached child by design, so the pid is the only handle a *replacement*
+    # server has on it, and without this a restart mid-run makes a composing
+    # pipeline look interrupted and makes its Cancel button a lie.
+    try:
+        (run_dir / "child.pid").write_text(f"{proc.pid}\n", encoding="utf-8")
+    except OSError:
+        # Not fatal: this server still holds the Popen. Only a restart loses it.
+        pass
+
     with _PROCESS_LOCK:
         _PROCESSES[run_id] = proc
     threading.Thread(target=_watch, args=(run_id, run_dir, proc), daemon=True).start()
@@ -723,22 +814,82 @@ def cancel_run(run_id: str) -> dict[str, Any]:
     run_dir = _run_dir(run_id)
     with _PROCESS_LOCK:
         proc = _PROCESSES.get(run_id)
-    if proc is None or proc.poll() is not None:
+
+    # A run this server did not launch is still cancellable, via the pid the
+    # launching server recorded. Refusing would mean a restart leaves a paying
+    # user watching a run they can no longer stop.
+    pid: int | None = None
+    if proc is not None and proc.poll() is None:
+        pid = proc.pid
+    elif proc is None:
+        recorded = _recorded_pid(run_dir)
+        if recorded is not None and _pid_is_this_run(recorded, run_id):
+            pid = recorded
+
+    if pid is None:
         return {
             "run_id": run_id,
             "cancelled": False,
-            "detail": "No live process here. The run has finished, or it was started elsewhere.",
+            "detail": "No live process for this run. It has already finished or exited.",
             "status": _status_of(run_dir, _last_event(run_dir)),
         }
+
     with _PROCESS_LOCK:
         _CANCELLED.add(run_id)
     try:
         # The child is its own process group leader (start_new_session), so this
         # also stops the composer programs it has spawned.
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
-        proc.terminate()
+        if proc is not None:
+            proc.terminate()
+        else:
+            # Adopted run: no Popen to fall back on, so signal the pid directly.
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                with _PROCESS_LOCK:
+                    _CANCELLED.discard(run_id)
+                return {
+                    "run_id": run_id,
+                    "cancelled": False,
+                    "detail": "The pipeline process could not be signalled.",
+                    "status": _status_of(run_dir, _last_event(run_dir)),
+                }
+
+    if proc is None:
+        # Nothing is wait()ing on an adopted child, so no _watch thread will turn
+        # its death into a terminal event. Say so here or the log never ends and
+        # every SSE reader tails a file that will not grow.
+        threading.Thread(
+            target=_watch_adopted, args=(run_id, run_dir, pid), daemon=True
+        ).start()
     return {"run_id": run_id, "cancelled": True, "detail": "Termination signalled."}
+
+
+def _watch_adopted(run_id: str, run_dir: Path, pid: int, timeout: float = 30.0) -> None:
+    """Close out a run we signalled but never spawned.
+
+    ``_watch`` relies on ``proc.wait()``, which only the parent can call. For an
+    adopted child the best available signal is that the pid stops answering, so
+    poll for that and then write the terminal event the pipeline never got to.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_is_this_run(pid, run_id):
+            break
+        time.sleep(0.5)
+    with _PROCESS_LOCK:
+        _CANCELLED.discard(run_id)
+    if _terminal_event(run_dir) is not None:
+        return
+    _append_event(
+        run_dir,
+        "run.failed",
+        "Run cancelled: the pipeline process was terminated.",
+        reason="cancelled",
+        pid=pid,
+    )
 
 
 @app.get("/api/runs/{run_id}/status")
@@ -748,7 +899,7 @@ def run_status(run_id: str) -> dict[str, Any]:
     return {
         "run_id": run_id,
         "status": _status_of(run_dir, last),
-        "live": _process_alive(run_id),
+        "live": _process_alive(run_id, run_dir),
         "last_kind": last.kind if last else None,
         "last_seq": last.seq if last else 0,
         "request": _read_json(run_dir / "request.json", {}),
@@ -873,7 +1024,7 @@ def get_run_file(run_id: str, path: str) -> FileResponse:
 
 # The four artifact paths an artifact.rendered event carries. Named here so the
 # candidates endpoint and the page agree on the shape without either guessing.
-ARTIFACT_KEYS = ("audio", "piano_roll", "midi", "program")
+ARTIFACT_KEYS = ("audio", "piano_roll", "midi", "program", "daw_bundle")
 
 # A MIDI file we parse only because no sidecar was written. Above this size the
 # parse costs more than the metadata is worth on a request that has to stay
@@ -939,7 +1090,6 @@ def _candidate_index(run_dir: Path) -> dict[str, dict[str, Any]]:
                 "candidate_id": candidate_id,
                 "team": None,
                 "round": round_no,
-                "is_reference": False,
                 "preview": False,
                 "first_seq": event.seq,
                 "artifacts": {},
@@ -952,8 +1102,6 @@ def _candidate_index(run_dir: Path) -> dict[str, dict[str, Any]]:
         team = data.get("team") or event.team
         if team and not found["team"]:
             found["team"] = str(team)
-        if data.get("is_reference") is True or candidate_id == "reference" or team == "reference":
-            found["is_reference"] = True
         return found
 
     for event in read_events(run_dir / "events.jsonl"):
@@ -993,9 +1141,10 @@ def _candidate_index(run_dir: Path) -> dict[str, dict[str, Any]]:
                 else [],
                 "spread": data.get("spread") if isinstance(data.get("spread"), int) else None,
                 "rationale": str(data.get("rationale") or ""),
-                # A count, not the findings themselves: the detail panel already
-                # gets those from the event stream, and a browse view that had to
-                # download every finding to draw a card would be slower for it.
+                # A count here; the text is merged in from verdicts.json by
+                # _merge_disk_verdicts. The event log deliberately records only
+                # the count, because one round of full findings is over 100KB and
+                # the log is replayed in full on every page load.
                 "findings": len(findings),
             }
             for finding in findings:
@@ -1020,7 +1169,113 @@ def _candidate_index(run_dir: Path) -> dict[str, dict[str, Any]]:
                 if isinstance(candidate_id, str) and candidate_id:
                     entry(candidate_id, event)
 
+    _merge_disk_verdicts(run_dir, index)
+    _fold_previews_into_judged(index)
     return index
+
+
+def _merge_disk_verdicts(run_dir: Path, index: dict[str, dict[str, Any]]) -> None:
+    """Fill in the rationale and findings the event log does not carry.
+
+    ``judge.verdict`` records a score and a finding *count*, not the text: one
+    round of findings is over 100KB and the log is replayed in full on every page
+    load. The full verdicts are written to ``round<N>/verdicts.json``, which is
+    the authoritative record, so read them from there.
+
+    Without this a card had a score and nothing else -- no rationale, no
+    bar-anchored claim, no suggested revision -- which is the entire substance of
+    the feedback loop and the only reason to look at a verdict at all.
+    """
+    for path in sorted(run_dir.glob("round*/verdicts.json")):
+        payload = _read_json(path, {})
+        verdicts = payload.get("verdicts")
+        if not isinstance(verdicts, dict):
+            continue
+        round_no = payload.get("round")
+        for candidate_id, verdict in verdicts.items():
+            if not isinstance(verdict, dict):
+                continue
+            found = _find_candidate(
+                index, str(candidate_id), round_no if isinstance(round_no, int) else None
+            )
+            if found is None:
+                continue
+            for scored in verdict.get("dimensions") or []:
+                if not isinstance(scored, dict):
+                    continue
+                dimension = str(scored.get("dimension") or "")
+                target = found["scores"].get(dimension)
+                if target is None:
+                    continue
+                rationale = scored.get("rationale")
+                if isinstance(rationale, str) and rationale.strip():
+                    target["rationale"] = rationale
+                findings = scored.get("findings")
+                if isinstance(findings, list):
+                    target["findings"] = len(findings)
+                    target["finding_list"] = [f for f in findings if isinstance(f, dict)]
+                    for finding in target["finding_list"]:
+                        track = finding.get("track")
+                        if isinstance(track, str) and track.strip():
+                            name = track.strip()
+                            if name not in found["finding_tracks"]:
+                                found["finding_tracks"].append(name)
+
+
+def _fold_previews_into_judged(index: dict[str, dict[str, Any]]) -> None:
+    """Mark each preview as superseded once its judged counterpart appears.
+
+    A preview and the judged candidate for the same team and round are the *same
+    music*: the loop renders a clip the moment a composer finishes so there is
+    something to audition immediately, then renders it again under a blinded id
+    for the panel. Listing both gave a producer six cards for three takes and no
+    way to tell which pair was a duplicate, which is worse than useless when the
+    job is deciding which take to keep.
+
+    Superseded entries are marked rather than deleted, because this index is also
+    what resolves an incoming feedback POST. A page that loaded mid-composition
+    holds preview ids, and rating a take must not start failing the moment
+    judging happens to catch up.
+    """
+    by_take: dict[tuple[str, int | None], list[dict[str, Any]]] = {}
+    for found in index.values():
+        team = found.get("team")
+        if not team:
+            # An entry with no team attribution cannot be matched to a preview
+            # without guessing.
+            continue
+        by_take.setdefault((str(team), found["round"]), []).append(found)
+
+    for entries in by_take.values():
+        previews = [e for e in entries if e["preview"]]
+        # Any blinded render counts, scored or not. Requiring scores meant that
+        # while a round was being judged the page showed both the preview and its
+        # blinded twin -- five or six cards for three takes, resolving to three
+        # only once the last verdict landed. The music is identical from the
+        # moment the blinded render exists, and any artifact the blinded event
+        # omits is copied up from the preview below, so the merged card is always
+        # playable.
+        judged = [e for e in entries if not e["preview"] and (e["artifacts"] or e["scores"])]
+        if not previews or not judged:
+            continue
+        # Prefer a scored entry, then the earliest. Its id is the one the panel,
+        # the Elo table and the coach all use, so it is what feedback should key
+        # to.
+        winner = min(judged, key=lambda e: (not e["scores"], e["first_seq"]))
+        for preview in previews:
+            for key, value in preview["artifacts"].items():
+                # Fill gaps only. The judged render is the artifact the scores
+                # actually describe, but the preview carries things the judged
+                # event never mentions, the DAW bundle among them.
+                winner["artifacts"].setdefault(key, value)
+            if not winner["gate"] and preview["gate"]:
+                winner["gate"] = preview["gate"]
+            winner.setdefault("superseded_ids", []).append(preview["candidate_id"])
+            preview["superseded_by"] = winner["candidate_id"]
+            # Keep the card where the producer last saw it. The preview appeared
+            # first, so inheriting its sequence means the take upgrades in place
+            # instead of jumping to the end of the row when its scores land.
+            winner["first_seq"] = min(winner["first_seq"], preview["first_seq"])
 
 
 def _find_candidate(
@@ -1050,7 +1305,7 @@ def _score_meta(run_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:
     used in their findings. The last is a genuine fallback rather than a guess --
     "the pads are muddying the mid" tells you there is a track called pad -- and
     it is what keeps the per-track feedback rows usable for a run whose sidecar
-    was never written, which includes every reference piece.
+    was never written.
     """
     meta: dict[str, Any] = {
         "key": "",
@@ -1198,7 +1453,23 @@ def list_candidates(run_id: str) -> dict[str, Any]:
     for entry in index.values():
         if not entry["artifacts"] and not entry["scores"] and entry["gate"] is None:
             continue
+        if entry.get("superseded_by"):
+            # Its judged counterpart is listed instead, carrying this preview's
+            # artifacts and any feedback recorded against it. Drawing both is how
+            # three takes became six cards.
+            continue
         candidate_id = entry["candidate_id"]
+        # Runs recorded before references were removed from the tool still have a
+        # reference entry per round on disk. It was a judging control, not a take
+        # on offer, and its artifacts live outside the candidate path so the card
+        # had nothing to play. Kept out of the listing so an old run reads the
+        # same as a new one.
+        #
+        # Matched against the exact ids the loop used to mint, not a suffix: an
+        # endswith("ref") test also swallowed ordinary candidates whose ids happen
+        # to end that way, which is how a real candidate called "cref" vanished.
+        if entry.get("team") == "reference" or LEGACY_REFERENCE_ID_RE.match(candidate_id):
+            continue
         meta = _score_meta(run_dir, entry)
         # Published in rubric order, with anything unrecognised appended, so the
         # page can draw a fixed set of bars and a new dimension still shows up.
@@ -1206,14 +1477,25 @@ def list_candidates(run_id: str) -> dict[str, Any]:
         ordered += [value for key, value in entry["scores"].items() if key not in DIMENSIONS]
         values = [s["score"] for s in ordered if isinstance(s.get("score"), int)]
         export = _match_export(zips, candidate_id)
-        feedback, feedback_count = _feedback_for(records, candidate_id, entry["round"])
+        # Feedback recorded against a superseded preview belongs to this take. A
+        # producer who rated a clip before judging finished has not rated a
+        # different piece of music, and losing that rating would silently drop the
+        # signal the coach values most.
+        feedback, feedback_count = _feedback_for(
+            records,
+            candidate_id,
+            entry["round"],
+            also=entry.get("superseded_ids") or (),
+        )
         candidates.append(
             {
                 "candidate_id": candidate_id,
                 "team": entry["team"],
                 "round": entry["round"],
-                "is_reference": entry["is_reference"],
                 "preview": entry["preview"],
+                # Ids this card absorbed, so a page holding a preview id can still
+                # tell which card its rating landed on.
+                "superseded_ids": entry.get("superseded_ids") or [],
                 "first_seq": entry["first_seq"],
                 "artifacts": entry["artifacts"],
                 "gate": entry["gate"],
@@ -1276,7 +1558,10 @@ def _read_feedback(run_dir: Path) -> list[dict[str, Any]]:
 
 
 def _feedback_for(
-    records: list[dict[str, Any]], candidate_id: str, round_no: int | None
+    records: list[dict[str, Any]],
+    candidate_id: str,
+    round_no: int | None,
+    also: tuple[str, ...] | list[str] = (),
 ) -> tuple[dict[str, Any] | None, int]:
     """The newest record for one candidate, and how many there are.
 
@@ -1284,11 +1569,15 @@ def _feedback_for(
     the earlier ones are the history of them changing their mind. A record whose
     round is unset matches any round, because that is a record from a client that
     did not know, not a record about a different take.
+
+    ``also`` names ids this take absorbed, currently the preview rendered from the
+    same program. Those ratings are about this music and count as this take's.
     """
+    wanted = {candidate_id, *also}
     latest: dict[str, Any] | None = None
     count = 0
     for record in records:
-        if record.get("candidate_id") != candidate_id:
+        if record.get("candidate_id") not in wanted:
             continue
         recorded = record.get("round")
         if isinstance(recorded, int) and recorded and round_no and recorded != round_no:
@@ -1420,69 +1709,48 @@ def _match_export(zips: list[Path], candidate_id: str) -> Path | None:
     return None
 
 
-def _generate_export(run_dir: Path, entry: dict[str, Any]) -> Path | None:
-    """Ask ``houseband.export`` for a bundle, if that module exists yet.
+def _generate_export(run_dir: Path, entry: dict[str, Any]) -> tuple[Path | None, list[str]]:
+    """Ask ``houseband.export`` for a bundle, and report why if it declines.
 
-    This server does not own the export format and should not pin a signature it
-    did not define, so it offers ``export_bundle`` only the arguments the
-    function actually declares and gives up if it declares a required one we
-    cannot name a value for. A call that does not fit, or does not work, produces
-    a 404: "there is no bundle here" is honest, and a traceback out of someone
-    else's module is noise.
+    Returns the zip and no complaints, or no zip and whatever the exporter said
+    about it. The import is guarded because this server has to run in a checkout
+    where ``houseband.export`` is absent, and the call is guarded because this
+    server does not own the export format: a bundle it cannot get is a 404, and a
+    traceback out of someone else's module is noise.
+
+    The exporter's own ``problems`` are passed through, though. It refuses to
+    write a bundle it thinks a producer would not trust, and "MIDI contains no
+    notes" is a far more useful 404 than "not found".
+
+    All candidates share one ``exports/`` directory, distinguished by stem, which
+    is the layout ``export_bundle`` documents for exactly this caller.
     """
     try:
-        from houseband import export as export_mod
+        from houseband.export import export_bundle
     except ImportError:
-        return None
-    builder = getattr(export_mod, "export_bundle", None)
-    if not callable(builder):
-        return None
+        return None, []
 
     relative = entry["artifacts"].get("midi")
     midi_path = _safe_path(run_dir, relative) if relative else None
     if midi_path is None or not midi_path.is_file():
-        return None
+        return None, ["This candidate has no MIDI file to export."]
     sidecar = midi_path.with_suffix(".score.json")
-    out_dir = run_dir / "exports"
-    offered: dict[str, Any] = {
-        "midi_path": midi_path,
-        "midi": midi_path,
-        "run_dir": run_dir,
-        "out_dir": out_dir,
-        "outdir": out_dir,
-        "dest": out_dir,
-        "dest_dir": out_dir,
-        "sidecar_path": sidecar if sidecar.is_file() else None,
-        "sidecar": sidecar if sidecar.is_file() else None,
-        "stem": entry["candidate_id"],
-        "candidate_id": entry["candidate_id"],
-        "config": cfg.load(),
-    }
-
-    import inspect
 
     try:
-        parameters = inspect.signature(builder).parameters
-        kwargs: dict[str, Any] = {}
-        for name, parameter in parameters.items():
-            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
-                continue
-            if name in offered:
-                kwargs[name] = offered[name]
-            elif parameter.default is parameter.empty:
-                return None
-        out_dir.mkdir(parents=True, exist_ok=True)
-        result = builder(**kwargs)
-    except Exception:
-        return None
+        result = export_bundle(
+            midi_path=midi_path,
+            sidecar_path=sidecar if sidecar.is_file() else None,
+            out_dir=run_dir / "exports",
+            stem=entry["candidate_id"],
+        )
+    except Exception as error:  # noqa: BLE001 - relayed to the client as a 404
+        return None, [f"The exporter raised {type(error).__name__}: {error}"]
 
-    for attribute in ("zip_path", "zip", "path", "bundle", "archive"):
-        found = getattr(result, attribute, None)
-        if isinstance(found, (str, Path)) and Path(found).is_file():
-            return Path(found).resolve()
-    # The result did not name its own file, so fall back to looking for what it
-    # just wrote.
-    return _match_export(_export_zips(run_dir), entry["candidate_id"])
+    zip_path = getattr(result, "zip_path", None)
+    if zip_path is not None and Path(zip_path).is_file():
+        return Path(zip_path).resolve(), []
+    problems = getattr(result, "problems", None)
+    return None, [str(problem) for problem in problems] if isinstance(problems, list) else []
 
 
 @app.get("/api/runs/{run_id}/export/{candidate_id}")
@@ -1491,15 +1759,17 @@ def get_export(run_id: str, candidate_id: str) -> FileResponse:
     run_dir = _run_dir(run_id)
     if not CANDIDATE_ID_RE.match(candidate_id):
         raise HTTPException(status_code=400, detail="Malformed candidate id.")
+    problems: list[str] = []
     path = _match_export(_export_zips(run_dir), candidate_id)
     if path is None:
         entry = _find_candidate(_candidate_index(run_dir), candidate_id, None)
         if entry is not None:
-            path = _generate_export(run_dir, entry)
+            path, problems = _generate_export(run_dir, entry)
     if path is None:
-        raise HTTPException(
-            status_code=404, detail=f"No DAW export bundle for {candidate_id} in this run."
-        )
+        detail = f"No DAW export bundle for {candidate_id} in this run."
+        if problems:
+            detail += " " + " ".join(problems[:4])
+        raise HTTPException(status_code=404, detail=detail)
     return FileResponse(
         path,
         media_type="application/zip",

@@ -246,7 +246,7 @@ def render_piano_roll(
 
     Velocity maps to opacity so dynamic flatness is visible at a glance, and
     labelled section boundaries make form legible without counting bars. When no
-    sidecar is available (a reference MIDI, say) the x-axis falls back to the
+    sidecar is available (a MIDI we did not author) the x-axis falls back to the
     file's own initial tempo.
     """
     import matplotlib

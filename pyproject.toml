@@ -59,7 +59,7 @@ include = ["houseband*"]
 # rather than being compiled in.
 #
 # web/index.html is deliberately not here. It lives at the repo root and the
-# server resolves it through config.REPO_ROOT, along with references/, runs/ and
+# server resolves it through config.REPO_ROOT, along with runs/ and
 # playbooks/. Those are all working directories of a checkout rather than package
 # contents, which is why running from a clone is the supported deployment and
 # `pip install -e .` is the only install mode that behaves.
@@ -69,7 +69,11 @@ houseband = ["judges/rubrics/*.md", "prompts/*.md"]
 testpaths = ["tests"]
 # Import mode "importlib" keeps tests from needing __init__.py files, and rootdir
 # ends up on sys.path via the installed package or PYTHONPATH=. either way.
-addopts = "-q --strict-markers"
+# Parallel by default. The suite is dominated by subprocess renders and fluidsynth
+# calls, which are IO-bound and independent, so wall-clock drops roughly with core
+# count. Every test writes under tmp_path, so there is no shared state to
+# serialise on.
+addopts = "-q --strict-markers -n auto"
 filterwarnings = [
     # pretty_midi emits a RuntimeWarning on tempo-change-heavy files, which the
     # tempo ramp in examples/good_program.py triggers by design.

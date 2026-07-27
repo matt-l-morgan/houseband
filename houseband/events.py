@@ -101,9 +101,9 @@ EventKind = Literal[
     # per-round
     "round.started",
     "round.finished",
-    # analyst
-    "analyst.started",
-    "analyst.finished",
+    # brief and criteria, once per run
+    "brief.finished",
+    "criteria.derived",
     # composers
     "composer.started",
     "composer.thinking",

@@ -29,93 +29,20 @@ ROLES: tuple[Role, ...] = ("songwriter", "rhythm", "arranger", "mix")
 
 Severity = Literal["minor", "moderate", "major"]
 
-# The eight judged dimensions. Keys are stable identifiers used in filenames,
+# The nine judged dimensions. Keys are stable identifiers used in filenames,
 # event payloads, and playbook sections, so they must not change casually.
+#
+# There is deliberately no "form and arrangement" here. This tool makes short
+# loopable clips, and that rubric rewards a climax in the final third, sections
+# whose material contrasts, and transitions that prepare what follows. A loop has
+# one section by definition, so it would score 2 no matter how good it was, and a
+# composer reading that finding would be coached into ruining it. loop_usability
+# is the structural dimension instead: a clip's structure is its loop point.
+#
+# headroom has no equivalent in longer music at all. In a finished piece a full
+# arrangement is the goal; in a starter it is the failure, because the producer
+# has nowhere left to put their own idea.
 DIMENSIONS: tuple[str, ...] = (
-    "prompt_adherence",
-    "melody",
-    "harmony_voice_leading",
-    "rhythm_groove",
-    "form_arrangement",
-    "orchestration_register",
-    "production",
-    "originality",
-)
-
-DIMENSION_TITLES: dict[str, str] = {
-    "prompt_adherence": "Prompt adherence",
-    "melody": "Melody",
-    "harmony_voice_leading": "Harmony and voice leading",
-    "rhythm_groove": "Rhythm and groove",
-    "form_arrangement": "Form and arrangement",
-    "orchestration_register": "Orchestration and register",
-    "production": "Production",
-    "originality": "Originality",
-    # Starter-only. A long-form piece is not judged on either: a four-minute
-    # arrangement has no loop point, and "leave room for the producer" is not a
-    # thing a finished piece is supposed to do.
-    "loop_usability": "Loop usability",
-    "headroom": "Headroom",
-}
-
-# Weights for the composite score. Form and adherence carry the most because
-# they are where machine-composed music most reliably falls down, and because a
-# piece that ignores the brief is not redeemable by good voice leading.
-DIMENSION_WEIGHTS: dict[str, float] = {
-    "prompt_adherence": 1.5,
-    "melody": 1.25,
-    "harmony_voice_leading": 1.0,
-    "rhythm_groove": 1.0,
-    "form_arrangement": 1.5,
-    "orchestration_register": 1.0,
-    "production": 0.75,
-    "originality": 1.0,
-}
-
-
-# ---------------------------------------------------------------------------
-# Modes
-# ---------------------------------------------------------------------------
-
-# Two very different deliverables share this pipeline.
-#
-# "longform" is a complete 4-8 minute piece, judged on whether it develops and
-# arrives somewhere. "starter" is what a producer actually drags into Ableton: a
-# loopable 8-32 bar section with a groove, a progression and deliberate headroom
-# to build on. They need different briefs, different criteria, different rubric
-# weights and a different export, so the mode is threaded through rather than
-# guessed from the prompt.
-#
-# Declared here, above the verdict types, because the panel's dimension sets and
-# weights are keyed by mode and a verdict carries the mode it was scored under.
-Mode = Literal["starter", "longform"]
-MODES: tuple[Mode, ...] = ("starter", "longform")
-
-# Bar counts offered for starter mode. Powers of two because a producer expects a
-# clip to loop against a 4/4 grid without arithmetic.
-STARTER_BAR_CHOICES: tuple[int, ...] = (8, 16, 32)
-STARTER_BARS_DEFAULT = 16
-
-
-# ---------------------------------------------------------------------------
-# Dimensions per mode
-# ---------------------------------------------------------------------------
-
-# The eight above were written for a piece that has somewhere to go. Three of
-# them mean something different, or nothing, when the deliverable is a 16-bar
-# clip:
-#
-# * ``form_arrangement`` is dropped outright. Its anchors reward a climax in the
-#   final third, sections whose material genuinely contrasts, and transitions
-#   that prepare what follows. A loop has one section by definition, so it scores
-#   2 on that rubric no matter how good it is, and the composer reading that
-#   finding would be coached to ruin it.
-# * ``loop_usability`` replaces it as the structural dimension: a clip's
-#   structure is its loop point, not its arc.
-# * ``headroom`` has no long-form equivalent at all. In a finished piece a full
-#   arrangement is the goal; in a starter it is the failure, because the producer
-#   has nowhere left to put their own idea.
-STARTER_DIMENSIONS: tuple[str, ...] = (
     "prompt_adherence",
     "melody",
     "harmony_voice_leading",
@@ -127,40 +54,43 @@ STARTER_DIMENSIONS: tuple[str, ...] = (
     "originality",
 )
 
-LONGFORM_DIMENSIONS: tuple[str, ...] = DIMENSIONS
-
-DIMENSIONS_FOR_MODE: dict[Mode, tuple[str, ...]] = {
-    "starter": STARTER_DIMENSIONS,
-    "longform": LONGFORM_DIMENSIONS,
+DIMENSION_TITLES: dict[str, str] = {
+    "prompt_adherence": "Prompt adherence",
+    "melody": "Melody",
+    "harmony_voice_leading": "Harmony and voice leading",
+    "rhythm_groove": "Rhythm and groove",
+    "loop_usability": "Loop usability",
+    "orchestration_register": "Orchestration and register",
+    "headroom": "Headroom",
+    "production": "Production",
+    "originality": "Originality",
 }
 
-# Starter weights, and why they are not the long-form ones.
+# Weights for the composite score, and why they are what they are.
 #
-# The groove is the product. A producer auditions a starter by dropping it on a
+# The groove is the product. A producer auditions a clip by dropping it on a
 # timeline and nodding or not nodding, and that judgement is made on the pocket
 # within about two bars, so ``rhythm_groove`` and ``loop_usability`` carry the
 # most: a clip with a great progression and a stiff, badly-looping groove gets
 # deleted, and a clip with an ordinary progression over a groove that moves gets
 # kept and built on.
 #
-# ``melody`` drops from 1.25 to 0.75, which is the one weight that looks wrong
-# and is the most deliberate. The producer supplies the topline. An insistent
-# fully-formed melody in a starter is not a bonus, it competes for the register
-# and the attention the vocal needs, and it is the first thing to be deleted. We
-# still judge it, because a limp motif is evidence about the composer, but it
-# must not outrank the groove.
+# ``melody`` at 0.75 is the one weight that looks wrong and is the most
+# deliberate. The producer supplies the topline. An insistent fully-formed melody
+# is not a bonus, it competes for the register and the attention a vocal needs,
+# and it is the first thing to be deleted. We still judge it, because a limp motif
+# is evidence about the composer, but it must not outrank the groove.
 #
-# ``orchestration_register`` rises to 1.25 because it is doing double duty here:
-# register separation is what keeps a slot open for a lead and what makes the
-# stems separable when the producer deletes half of them.
+# ``orchestration_register`` is doing double duty at 1.25: register separation is
+# what keeps a slot open for a lead and what makes the stems separable when the
+# producer deletes half of them.
 #
-# ``headroom`` sits at 1.25, below the groove pair on purpose. Space is necessary
-# and cheap to fake, and weighting it any higher would reward a composer for
-# handing in less.
+# ``headroom`` sits below the groove pair on purpose. Space is necessary and cheap
+# to fake, and weighting it higher would reward handing in less.
 #
 # ``prompt_adherence`` holds at 1.5: a producer asked for dub techno at 132 and a
 # clip that arrives as lo-fi hip hop is not a near miss, it is unusable.
-STARTER_WEIGHTS: dict[str, float] = {
+DIMENSION_WEIGHTS: dict[str, float] = {
     "prompt_adherence": 1.5,
     "melody": 0.75,
     "harmony_voice_leading": 1.0,
@@ -172,10 +102,17 @@ STARTER_WEIGHTS: dict[str, float] = {
     "originality": 1.0,
 }
 
-WEIGHTS_FOR_MODE: dict[Mode, dict[str, float]] = {
-    "starter": STARTER_WEIGHTS,
-    "longform": DIMENSION_WEIGHTS,
-}
+
+# ---------------------------------------------------------------------------
+# Clip length
+# ---------------------------------------------------------------------------
+
+# Bar counts on offer. Powers of two because a producer expects a clip to loop
+# against a 4/4 grid without arithmetic. Sixteen bars is about 30 seconds at 128bpm,
+# 22 at drum-and-bass tempo and 43 at 90, which is the range this tool targets.
+BAR_CHOICES: tuple[int, ...] = (8, 16, 32)
+BARS_DEFAULT = 16
+
 
 
 # ---------------------------------------------------------------------------
@@ -219,10 +156,10 @@ class Brief(BaseModel):
 class Candidate:
     """One submission, plus everything derived from it.
 
-    ``candidate_id`` is what judges see. It is deliberately opaque (``c1``,
-    ``c2``) rather than the team name, because judges must be blind to which
-    team produced which piece, and the reference has to be indistinguishable
-    from an agent's work for the calibration check to mean anything.
+    ``candidate_id`` is what judges see. It is deliberately opaque (``r1c1``,
+    ``r1c2``) rather than the team name, because judges must be blind to which
+    team produced which piece: a persona name in the pool would let a judge
+    reward the persona it finds most convincing rather than the music.
     """
 
     candidate_id: str
@@ -233,13 +170,12 @@ class Candidate:
     score_text: str = ""
     piano_roll: Path | None = None
     audio: Path | None = None
-    is_reference: bool = False
     round: int = 0
     notes: str = ""
 
     @property
     def display_name(self) -> str:
-        return "reference" if self.is_reference else self.team
+        return self.team
 
 
 # ---------------------------------------------------------------------------
@@ -325,14 +261,6 @@ class CandidateVerdict(BaseModel):
 
     candidate_id: str
     team: str
-    is_reference: bool = False
-    # Which deliverable this was judged as, and therefore which weights apply.
-    # Carried on the verdict rather than passed to weighted_total because the
-    # verdict outlives the call that produced it: it is serialised into the run
-    # log and read back by the reporter and the coach, and a score reweighted at
-    # read time under the wrong mode would be silently wrong. Defaults to
-    # longform so verdicts written before modes existed still deserialise.
-    mode: Mode = "longform"
     dimensions: list[ScoredDimension] = Field(default_factory=list)
 
     def by_dimension(self) -> dict[str, ScoredDimension]:
@@ -343,22 +271,17 @@ class CandidateVerdict(BaseModel):
         return found.score if found else None
 
     @property
-    def weights(self) -> dict[str, float]:
-        """The weight table this verdict's mode is scored against."""
-        return WEIGHTS_FOR_MODE.get(self.mode, DIMENSION_WEIGHTS)
-
-    @property
     def weighted_total(self) -> float:
         """Weighted mean across judged dimensions, on the same 1-10 scale.
 
         Weighted only over the dimensions actually present, so a partially
-        judged candidate is not penalised for the ones nobody scored, and a
-        starter is not penalised for having no ``form_arrangement`` at all.
+        judged candidate is not penalised for the dimensions nobody scored: a
+        dropped judge call leaves the total computed over what came back rather
+        than counting the gap as a zero.
         """
-        weights = self.weights
         total = weight_sum = 0.0
         for d in self.dimensions:
-            weight = weights.get(d.dimension, 1.0)
+            weight = DIMENSION_WEIGHTS.get(d.dimension, 1.0)
             total += d.score * weight
             weight_sum += weight
         return total / weight_sum if weight_sum else 0.0

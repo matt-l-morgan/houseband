@@ -98,8 +98,23 @@
   .scroll-x { overflow-x: auto; }
 
   /* ---------- start form ---------- */
-  form.start { display: grid; gap: 12px; grid-template-columns: 1fr 120px 120px 1fr; align-items: end; }
+  /* Three equal columns. The previous 1fr/120px/120px/1fr left a dangling empty
+     column, and align-items:end made rows jump whenever a hint line wrapped. */
+  form.start { display: grid; gap: 14px 16px; grid-template-columns: repeat(3, minmax(0, 1fr));
+               align-items: start; }
   form.start .wide { grid-column: 1 / -1; }
+  form.start .span2 { grid-column: span 2; }
+  form.start .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  form.start .field > .hint { margin: 0; min-height: 1.15em; }
+  form.start .actions { display: flex; gap: 8px; justify-content: flex-end;
+                        border-top: 1px solid var(--line); padding-top: 14px; }
+  /* The coach writes rules every round, so these lists grow without bound and
+     were pushing everything below them off the page. */
+  .scroll-y { max-height: 380px; overflow-y: auto; }
+  @media (max-width: 720px) {
+    form.start { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    form.start .span2 { grid-column: 1 / -1; }
+  }
   label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint); margin-bottom: 4px; }
   input, select, textarea {
     width: 100%; padding: 8px 10px; font-size: 13px;
@@ -153,8 +168,6 @@
   .spread { font-size: 10px; color: var(--ink-faint); }
   th.cand { cursor: pointer; }
   th.cand:hover { color: var(--accent); }
-  th.cand.sel, td.sel { background: #1b2333; }
-  tr.reference td, tr.reference th { color: var(--ref); }
   .pin { font-size: 9px; border: 1px solid #3d2f52; color: var(--ref); border-radius: 4px; padding: 1px 4px; }
   .delta.up { color: var(--good); }
   .delta.down { color: var(--bad); }
@@ -168,8 +181,6 @@
   .staged pre { margin-top: 8px; max-height: 220px; overflow: auto; font-size: 11px; background: #0f1218; padding: 9px; border-radius: 6px; border: 1px solid var(--line-soft); }
 
   /* ---------- detail ---------- */
-  .detail-media { display: grid; gap: 12px; grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr); align-items: start; }
-  .detail-media img { width: 100%; border-radius: 8px; border: 1px solid var(--line); background: #fff; display: block; }
   audio { width: 100%; }
   .finding { border-top: 1px solid var(--line-soft); padding: 8px 0; }
   .finding .anchor { font-family: var(--mono); font-size: 11px; color: var(--accent); }
@@ -178,6 +189,8 @@
   .sev.moderate { color: var(--warn); border-color: #4a3c14; }
   .sev.major { color: var(--bad); border-color: #4d2326; }
   .finding .fix { font-size: 12px; color: var(--ink-dim); margin-top: 3px; }
+  .vfindings { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 4px;
+               max-height: 340px; overflow-y: auto; }
   .dimblock { margin-top: 12px; }
   .dimblock > .row { border-bottom: 1px solid var(--line); padding-bottom: 5px; }
   .rationale { font-size: 12px; color: var(--ink-dim); margin-top: 5px; }
@@ -284,22 +297,37 @@
     <form class="start" id="start-form" autocomplete="off">
       <div class="wide">
         <label for="f-prompt">Prompt</label>
-        <textarea id="f-prompt" placeholder="e.g. a 90-second dub techno cue: sparse, hypnotic, wide dub chords, deep sub bass"></textarea>
+        <textarea id="f-prompt" placeholder="e.g. dub techno loop at 124: sparse, hypnotic, wide dub chords, deep sub bass, room for a vocal"></textarea>
       </div>
-      <div><label for="f-teams">Teams</label><input id="f-teams" type="number" min="1" max="8" value="3"></div>
-      <div><label for="f-rounds">Rounds</label><input id="f-rounds" type="number" min="1" max="20" value="3"></div>
-      <div><label for="f-reference">Reference MIDI</label><select id="f-reference"></select></div>
-      <div class="wide">
+
+      <div class="field">
+        <label for="f-teams">Composers</label>
+        <input id="f-teams" type="number" min="1" max="8" value="3">
+        <div class="hint">independent takes per round</div>
+      </div>
+      <div class="field">
+        <label for="f-rounds">Rounds</label>
+        <input id="f-rounds" type="number" min="1" max="20" value="3">
+        <div class="hint">each one learns from the last</div>
+      </div>
+      <div class="field">
+        <label for="f-bars">Clip length</label>
+        <select id="f-bars"></select>
+        <div class="hint" id="bars-note"></div>
+      </div>
+
+      <div class="field span2">
         <label for="f-model">Model</label>
         <select id="f-model"></select>
         <div class="hint" id="model-note"></div>
       </div>
-      <div class="wide">
-        <label for="f-budget">Output-token allowance per round</label>
+      <div class="field">
+        <label for="f-budget">Spend limit per round</label>
         <input id="f-budget" type="number" min="20000" max="20000000" step="10000">
-        <div class="hint" id="budget-note"></div>
+        <div class="hint" id="budget-note">output tokens</div>
       </div>
-      <div class="row" style="justify-content:flex-end">
+
+      <div class="wide actions">
         <button type="submit" class="primary" id="btn-start">Start run</button>
         <button type="button" class="danger" id="btn-cancel" disabled>Cancel</button>
       </div>
@@ -357,7 +385,7 @@
     </section>
 
     <section class="panel">
-      <header><h2>Elo</h2><span class="hint">reference is pinned</span></header>
+      <header><h2>Round-over-round standing</h2><span class="hint" id="elo-hint">who won this round, not which take to keep</span></header>
       <div class="scroll-x" id="elo"><div class="empty">No ratings yet.</div></div>
       <div id="pairwise"></div>
     </section>
@@ -366,19 +394,13 @@
   <div class="grid-2">
     <section class="panel">
       <header><h2>Coach - playbook rules</h2></header>
-      <div id="rules"><div class="empty">No rules written yet.</div></div>
+      <div id="rules" class="scroll-y"><div class="empty">No rules written yet.</div></div>
     </section>
     <section class="panel">
       <header><h2>Coach - staged library functions</h2><span class="hint">approval is a human read</span></header>
-      <div id="staged"><div class="empty">Nothing staged.</div></div>
+      <div id="staged" class="scroll-y"><div class="empty">Nothing staged.</div></div>
     </section>
   </div>
-
-  <section class="panel" id="detail-panel">
-    <header><h2>Candidate detail</h2><span class="hint" id="detail-hint">click a candidate column or a score</span></header>
-    <div id="detail-media"></div>
-    <div id="detail-body"></div>
-  </section>
 
   <details class="panel feed" id="feed-panel">
     <summary>Raw event feed</summary>
@@ -408,20 +430,21 @@ const state = {
   roundOutput: 0,
   runModel: null,     // the model this run is actually using
   teams: new Map(),        // team -> lane state
-  candidates: new Map(),   // candidate id -> { team, isReference, round, media, verdicts }
+  candidates: new Map(),   // candidate id -> { team, round, media, verdicts }
   elo: [],
   pairwise: [],
   rules: [],
   staged: [],
-  selected: null,
   openTools: new Set(),
-  detailMediaKey: "",
   feedCount: 0,
   // The variation browser. Its candidates come from /api/runs/<id>/candidates
   // rather than from the event stream, because tracks, key and tempo live in the
   // score sidecar and only the server can read that.
   browse: {
     loaded: false,
+    // Candidate ids whose judge findings are expanded in the card. Sticky across
+    // live refreshes so reading a finding survives the next verdict arriving.
+    openFindings: new Set(),
     candidates: [],
     sort: "generated",
     round: "all",
@@ -544,6 +567,7 @@ async function boot() {
 // Model catalogue from /api/config, kept module-level so the picker, the note,
 // and the cost readout all price from one source.
 let MODELS = [];
+let LENGTHS = [];
 
 function pricingFor(modelId) {
   if (!modelId) return null;
@@ -575,6 +599,16 @@ function showModelNote() {
     `${rounds} round(s), roughly $${worst.toFixed(2)} at ${chosen.id} output rates.`;
 }
 
+function showBarsNote() {
+  const note = el("bars-note");
+  if (!note) return;
+  const chosen = LENGTHS.find((entry) => String(entry.bars) === el("f-bars").value);
+  // Bars are what the composer and the DAW grid agree on, but a producer picks a
+  // length in seconds, and seconds depend on the tempo the composer chooses, so
+  // the honest answer is a range.
+  note.textContent = chosen ? chosen.note : "";
+}
+
 function applyConfig(config) {
   const model = config.model || "unknown model";
   el("chip-model").textContent = "model " + model;
@@ -603,12 +637,21 @@ function applyConfig(config) {
   models.onchange = showModelNote;
   showModelNote();
 
-  const references = el("f-reference");
-  references.innerHTML = '<option value="">none</option>' +
-    (config.references || []).map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join("");
-  if (!(config.references || []).length) {
-    references.innerHTML = '<option value="">none available</option>';
+  // Clip length. The three lengths come from the server rather than being
+  // hardcoded here, because the rubrics and the DAW-readiness check are written
+  // against that set and a fourth option in the page would render a clip the
+  // loop-usability judge then marks down.
+  LENGTHS = config.lengths || [];
+  const bars = el("f-bars");
+  if (LENGTHS.length) {
+    bars.innerHTML = LENGTHS.map((entry) =>
+      `<option value="${esc(entry.bars)}"${entry.default ? " selected" : ""}>` +
+      `${esc(entry.label)}</option>`).join("");
+  } else {
+    bars.innerHTML = '<option value="16">16 bars</option>';
   }
+  bars.onchange = showBarsNote;
+  showBarsNote();
 
   const soundfont = config.soundfont && config.soundfont.present;
   const fluidsynth = config.fluidsynth && config.fluidsynth.present;
@@ -712,7 +755,7 @@ async function onStart(event) {
         prompt: prompt,
         teams: Number(el("f-teams").value) || 3,
         rounds: Number(el("f-rounds").value) || 3,
-        reference: el("f-reference").value || null,
+        bars: Number(el("f-bars").value) || undefined,
         model: el("f-model").value || null,
         budget: Number(el("f-budget").value) || null,
       }),
@@ -786,18 +829,16 @@ function resetRun(runId) {
   state.pairwise = [];
   state.rules = [];
   state.staged = [];
-  state.selected = null;
   state.openTools = new Set();
-  state.detailMediaKey = "";
   state.feedCount = 0;
   state.browse.loaded = false;
   state.browse.candidates = [];
   state.browse.drafts = new Map();
   state.browse.focus = null;
+  state.browse.openFindings = new Set();
   browseNodes.clear();
   browseOrder = "";
   el("feed").innerHTML = "";
-  el("detail-media").innerHTML = "";
   el("browse-grid").innerHTML = "";
   el("run-label").textContent = runId;
   renderAll();
@@ -899,7 +940,7 @@ function candidate(event) {
   const key = candidateKey(event);
   if (!state.candidates.has(key)) {
     state.candidates.set(key, {
-      id: key, team: null, isReference: false, round: null,
+      id: key, team: null, round: null,
       media: { roll: null, audio: null, midi: null, program: null, extras: [] },
       verdicts: new Map(),
     });
@@ -908,8 +949,6 @@ function candidate(event) {
   const data = event.data || {};
   const team = pick(data, "team") || event.team;
   if (team) entry.team = team;
-  const reference = pick(data, "is_reference", "reference");
-  if (reference === true || team === "reference" || key === "reference") entry.isReference = true;
   if (num(event.round) !== null) entry.round = event.round;
   return entry;
 }
@@ -971,7 +1010,7 @@ function applyEvent(event) {
       state.round = num(event.round) !== null ? event.round : state.round;
       break;
 
-    case "analyst.started": case "analyst.finished":
+    case "brief.finished": case "criteria.derived":
       break;
 
     case "composer.started": {
@@ -1058,7 +1097,6 @@ function applyEvent(event) {
         const laneEntry = lane(event.team);
         laneEntry.note = "rendered " + entry.id;
       }
-      if (!state.selected) state.selected = entry.id;
       // Something new is playable, which is the one thing the browse view most
       // wants to know. Its tracks and tempo come from the sidecar, so ask.
       scheduleCandidates(800);
@@ -1080,7 +1118,6 @@ function applyEvent(event) {
         spread: num(pick(data, "spread")),
         findings: Array.isArray(pick(data, "findings")) ? pick(data, "findings") : [],
       });
-      if (!state.selected) state.selected = entry.id;
       scheduleCandidates(2000);
       break;
     }
@@ -1095,10 +1132,32 @@ function applyEvent(event) {
       break;
 
     case "pairwise.verdict": {
+      // Three events per pair: one reading per presentation order, then the
+      // resolved result. Only the last one carries a/b and is the actual
+      // outcome; the per-order readings use first/second and deliberately
+      // disagree when there is position bias. Rendering all three tripled the
+      // list, showed contradictory winners for the same pair, and printed
+      // "? vs ?" for two rows out of three because the keys are different.
+      const a = pick(data, "a", "candidate_a", "left");
+      const b = pick(data, "b", "candidate_b", "right");
+      if (!a || !b) break;
       state.pairwise.unshift({
-        a: pick(data, "a", "candidate_a", "left") || "?",
-        b: pick(data, "b", "candidate_b", "right") || "?",
-        winner: pick(data, "winner") || "?",
+        a: a,
+        b: b,
+        // winner_id names the candidate; winner is slot-relative ("A"/"B")
+        // because that is what drives the Elo update. Map it here so runs logged
+        // before winner_id existed still read as candidate ids rather than "B".
+        winner: (() => {
+          const named = pick(data, "winner_id");
+          if (named) return named;
+          const slot = pick(data, "winner");
+          if (slot === "A") return a;
+          if (slot === "B") return b;
+          return slot || "?";
+        })(),
+        // false means the two orders disagreed, so it was scored a draw. Worth
+        // showing: it is the tournament catching its own position bias.
+        agreed: pick(data, "agreed"),
         reason: pick(data, "reason", "rationale") || event.message || "",
         round: event.round,
       });
@@ -1162,13 +1221,12 @@ function accumulateUsage(usage) {
 
 function parseElo(data, event) {
   const rows = [];
-  const push = (name, elo, delta, reference, games) => {
+  const push = (name, elo, delta, games) => {
     if (!name) return;
     rows.push({
       name: String(name),
       elo: num(elo),
       delta: num(delta),
-      reference: reference === true || String(name).toLowerCase() === "reference",
       games: num(games),
     });
   };
@@ -1178,20 +1236,20 @@ function parseElo(data, event) {
     for (const row of table) {
       if (row && typeof row === "object") {
         push(pick(row, "team", "name", "candidate_id", "id"), pick(row, "elo", "rating", "score"),
-             pick(row, "delta", "change"), pick(row, "is_reference", "reference"), pick(row, "games", "n"));
+             pick(row, "delta", "change"), pick(row, "games", "n"));
       }
     }
   } else if (table && typeof table === "object") {
     for (const [name, value] of Object.entries(table)) {
       if (value && typeof value === "object") {
         push(name, pick(value, "elo", "rating", "score"), pick(value, "delta", "change"),
-             pick(value, "is_reference", "reference"), pick(value, "games", "n"));
+             pick(value, "games", "n"));
       } else {
         push(name, value, null, null, null);
       }
     }
   } else if (pick(data, "team") || event.team) {
-    push(pick(data, "team") || event.team, pick(data, "elo", "rating"), pick(data, "delta"), pick(data, "is_reference"), null);
+    push(pick(data, "team") || event.team, pick(data, "elo", "rating"), pick(data, "delta"), null);
   }
 
   rows.sort((a, b) => (b.elo || 0) - (a.elo || 0));
@@ -1244,7 +1302,8 @@ function draftFor(entry) {
   const key = browseKey(entry);
   let draft = state.browse.drafts.get(key);
   if (!draft) {
-    draft = { verdict: null, tracks: new Map(), note: "", dirty: false, saved: null, error: "", busy: false };
+    draft = { verdict: null, tracks: new Map(), note: "", dirty: false, saved: null,
+              error: "", busy: false, exporting: false };
     state.browse.drafts.set(key, draft);
   }
   return draft;
@@ -1343,9 +1402,10 @@ function mediaHtml(entry) {
   const audioUrl = fileUrl(entry.artifacts && entry.artifacts.audio);
   const midiUrl = fileUrl(entry.artifacts && entry.artifacts.midi);
   const programUrl = fileUrl(entry.artifacts && entry.artifacts.program);
-  const exportUrl = entry.export && entry.export.available
-    ? `/api/runs/${encodeURIComponent(state.runId)}/export/${encodeURIComponent(entry.candidate_id)}`
-    : null;
+  // Offered whenever there is a MIDI to build one from, not only when a zip is
+  // already on disk: the endpoint builds on demand, and a producer should not
+  // have to know which of those two states they are in.
+  const exportable = !!(entry.artifacts && entry.artifacts.midi);
 
   const meta = [
     entry.key || null,
@@ -1359,13 +1419,15 @@ function mediaHtml(entry) {
   const mean = num(entry.weighted_total);
   const badges = [
     entry.preview ? '<span class="chip warn">preview</span>' : "",
-    entry.is_reference ? '<span class="pin">reference</span>' : "",
     entry.gate && entry.gate.ok === false ? '<span class="chip bad">gate rejected</span>' : "",
   ].join("");
 
   const links = [
     midiUrl ? `<a href="${midiUrl}" download="${esc(entry.candidate_id)}.mid">download MIDI</a>` : "",
-    exportUrl ? `<a href="${exportUrl}" download>DAW zip</a>` : "",
+    exportable
+      ? `<button type="button" data-export="1" title="${entry.export && entry.export.available
+           ? "the bundle already on disk" : "built on request from this candidate's MIDI"}">DAW zip</button>`
+      : "",
     rollUrl ? `<a href="${rollUrl}" target="_blank" rel="noreferrer">roll</a>` : "",
     programUrl ? `<a href="${programUrl}" target="_blank" rel="noreferrer">program</a>` : "",
     `<button type="button" data-detail="1" title="show the judge findings for this take">findings</button>`,
@@ -1387,7 +1449,45 @@ function mediaHtml(entry) {
       <div class="vmeta">${esc(meta || "no score metadata")}</div>
       ${sparkHtml(entry.scores)}
       <div class="vlinks">${links}</div>
+      ${findingsHtml(entry)}
     </div>`;
+}
+
+function findingsHtml(entry) {
+  if (!state.browse.openFindings.has(entry.candidate_id)) return "";
+
+  const scores = entry.scores || [];
+  if (!scores.length) {
+    return '<div class="vfindings"><div class="hint">Not judged yet.</div></div>';
+  }
+
+  const blocks = scores.map((scored) => {
+    const findings = Array.isArray(scored.finding_list) ? scored.finding_list : [];
+    const spread = num(scored.spread);
+    const samples = Array.isArray(scored.samples) ? scored.samples : [];
+    const rows = findings.map((finding) => `<div class="finding">
+      <div class="row" style="gap:8px">
+        <span class="anchor">${esc(anchorOf(finding))}</span>
+        <span class="sev ${esc(String(finding.severity || "minor"))}">${esc(finding.severity || "minor")}</span>
+        ${finding.attributed_role ? `<span class="chip">${esc(finding.attributed_role)}</span>` : ""}
+      </div>
+      <div>${esc(finding.claim || "")}</div>
+      ${finding.suggested_revision ? `<div class="fix">&rarr; ${esc(finding.suggested_revision)}</div>` : ""}
+    </div>`).join("");
+
+    return `<div class="dimblock">
+      <div class="row" style="gap:8px">
+        <span class="score" style="background:${scoreColor(scored.score)}">${esc(scored.score == null ? "-" : scored.score)}</span>
+        <b>${esc(scored.title || scored.dimension || "")}</b>
+        ${spread ? `<span class="spread">spread &plusmn;${esc(spread)}</span>` : ""}
+        ${samples.length > 1 ? `<span class="spread">samples ${esc(samples.join(", "))}</span>` : ""}
+      </div>
+      ${scored.rationale ? `<div class="rationale">${esc(scored.rationale)}</div>` : ""}
+      ${rows || '<div class="hint" style="margin-top:5px">no findings on this dimension</div>'}
+    </div>`;
+  }).join("");
+
+  return `<div class="vfindings">${blocks}</div>`;
 }
 
 function feedbackHtml(entry) {
@@ -1435,12 +1535,18 @@ function feedbackHtml(entry) {
 // listeners, and a verdict button with two click handlers toggles twice and so
 // does nothing at all.
 function wireMedia(node, key) {
+  const bundle = node.querySelector("[data-export]");
+  if (bundle) bundle.addEventListener("click", () => downloadExport(node, key));
+
   const detail = node.querySelector("[data-detail]");
   if (detail) {
     detail.addEventListener("click", () => {
       const entry = entryFor(key);
-      if (entry) select(entry.candidate_id);
-      el("detail-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+      if (!entry) return;
+      const open = state.browse.openFindings;
+      if (open.has(entry.candidate_id)) open.delete(entry.candidate_id);
+      else open.add(entry.candidate_id);
+      renderBrowse();
     });
   }
 }
@@ -1478,10 +1584,12 @@ function wireFeedback(node, key) {
   const note = node.querySelector(".vnote");
   if (note) {
     note.addEventListener("input", () => {
-      const draft = draftFor(entryFor(key));
+      const entry = entryFor(key);
+      if (!entry) return;
+      const draft = draftFor(entry);
       draft.note = note.value;
       draft.dirty = true;
-      syncCard(node, entryFor(key));
+      syncCard(node, entry);
     });
   }
 
@@ -1520,6 +1628,8 @@ function syncCard(node, entry) {
     let cls = "vstatus";
     if (draft.busy) {
       text = "saving…";
+    } else if (draft.exporting) {
+      text = "building the DAW zip…";
     } else if (draft.error) {
       text = draft.error;
       cls = "vstatus bad";
@@ -1609,6 +1719,40 @@ async function submitFeedback(key) {
   } finally {
     draft.busy = false;
     renderBrowse();
+  }
+}
+
+// Fetched rather than linked, because the bundle may not exist yet and the
+// exporter refuses to write one it thinks a producer would not trust. A failed
+// download tells you which stuck note stopped it; a dead <a download> tells you
+// nothing at all.
+async function downloadExport(node, key) {
+  const entry = entryFor(key);
+  if (!entry || !state.runId) return;
+  const draft = draftFor(entry);
+  draft.exporting = true;
+  draft.error = "";
+  syncCard(node, entry);
+  try {
+    const url = `/api/runs/${encodeURIComponent(state.runId)}/export/${encodeURIComponent(entry.candidate_id)}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      let detail = response.statusText;
+      try { detail = (await response.json()).detail || detail; } catch (_) { /* keep it */ }
+      throw new Error(detail);
+    }
+    const href = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = entry.candidate_id + ".zip";
+    link.click();
+    URL.revokeObjectURL(href);
+    if (entry.export) entry.export.available = true;
+  } catch (error) {
+    draft.error = "export: " + truncate(error.message, 120);
+  } finally {
+    draft.exporting = false;
+    syncCard(node, entry);
   }
 }
 
@@ -1797,7 +1941,6 @@ function renderAll() {
   renderElo();
   renderRules();
   renderStaged();
-  renderDetail();
   updateControls();
 }
 
@@ -1904,10 +2047,19 @@ function renderLanes() {
 }
 
 function candidateOrder() {
-  return [...state.candidates.values()].sort((a, b) => {
-    if (a.isReference !== b.isReference) return a.isReference ? 1 : -1;
-    return a.id.localeCompare(b.id);
-  });
+  // Only takes the panel has actually scored. Every candidate the event stream
+  // has ever mentioned used to get a column, which meant a column of dashes for
+  // each per-composer preview (previews are rendered before the pool is blinded
+  // and are never judged) and for any id seen only in a pairwise verdict. By
+  // round two more than half the grid was empty.
+  return [...state.candidates.values()]
+    .filter((entry) => entry.verdicts.size)
+    .sort((a, b) => {
+      const ra = a.round == null ? -1 : a.round;
+      const rb = b.round == null ? -1 : b.round;
+      if (ra !== rb) return ra - rb;
+      return a.id.localeCompare(b.id);
+    });
 }
 
 function renderJudges() {
@@ -1921,26 +2073,25 @@ function renderJudges() {
   }
 
   const head = candidates.map((entry) => {
-    const label = entry.isReference ? `${entry.id} (reference)` : `${entry.id}${entry.team ? " · " + entry.team : ""}`;
-    const selected = state.selected === entry.id ? " sel" : "";
-    return `<th class="cand${selected}" data-cand="${esc(entry.id)}">${esc(label)}</th>`;
+    const round = entry.round != null ? `r${entry.round} ` : "";
+    const label = `${round}${entry.team || entry.id}`;
+    return `<th class="cand">${esc(label)}</th>`;
   }).join("");
 
   let filled = 0;
   const rows = dimensions.map((dimension) => {
     const cells = candidates.map((entry) => {
       const verdict = entry.verdicts.get(dimension.key);
-      const selected = state.selected === entry.id ? " sel" : "";
-      if (!verdict || verdict.score == null) return `<td class="${selected.trim()}"><span class="spread">-</span></td>`;
+      if (!verdict || verdict.score == null) return '<td><span class="spread">-</span></td>';
       filled += 1;
       const spread = verdict.spread != null
         ? verdict.spread
         : (verdict.samples.length > 1 ? Math.max(...verdict.samples) - Math.min(...verdict.samples) : null);
       const samples = verdict.samples.length > 1 ? ` samples ${verdict.samples.join(",")}` : "";
-      return `<td class="${selected.trim()}" data-cand="${esc(entry.id)}" title="${esc(truncate(verdict.rationale, 400))}${esc(samples)}">
+      return `<td title="${esc(truncate(verdict.rationale, 400))}${esc(samples)}">
         <span class="cell">
           <span class="score" style="background:${scoreColor(verdict.score)}">${esc(verdict.score)}</span>
-          ${spread ? `<span class="spread">±${esc(spread)}</span>` : ""}
+          ${spread ? `<span class="spread">&plusmn;${esc(spread)}</span>` : ""}
           ${verdict.findings.length ? `<span class="spread">${verdict.findings.length}f</span>` : ""}
         </span></td>`;
     }).join("");
@@ -1948,11 +2099,10 @@ function renderJudges() {
   }).join("");
 
   container.innerHTML = `<table><thead><tr><th>dimension</th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
-  el("judge-hint").textContent = `${filled} of ${dimensions.length * candidates.length} cells`;
-
-  container.querySelectorAll("[data-cand]").forEach((node) => {
-    node.addEventListener("click", () => select(node.getAttribute("data-cand")));
-  });
+  // The grid is a scoreboard now, not a selector: the findings it used to link to
+  // are read in the take's own card, so a click here has nothing left to do.
+  el("judge-hint").textContent =
+    `${filled} of ${dimensions.length * candidates.length} cells · hover a score for the rationale`;
 }
 
 function renderElo() {
@@ -1963,9 +2113,9 @@ function renderElo() {
     const rows = state.elo.map((row, index) => {
       const delta = row.delta == null ? "" :
         `<span class="delta ${row.delta >= 0 ? "up" : "down"}">${row.delta >= 0 ? "+" : ""}${row.delta.toFixed(1)}</span>`;
-      return `<tr class="${row.reference ? "reference" : ""}">
-        <td>${row.reference ? "-" : index + 1}</td>
-        <td>${esc(row.name)} ${row.reference ? '<span class="pin">pinned</span>' : ""}</td>
+      return `<tr>
+        <td>${index + 1}</td>
+        <td>${esc(row.name)}</td>
         <td>${row.elo == null ? "-" : row.elo.toFixed(1)}</td>
         <td>${delta}</td>
         <td>${row.games == null ? "" : row.games}</td>
@@ -1976,10 +2126,17 @@ function renderElo() {
 
   el("pairwise").innerHTML = state.pairwise.length
     ? `<h3 style="margin:14px 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-faint)">recent pairwise</h3>` +
-      state.pairwise.map((verdict) => `<div class="rule" style="border-color:var(--ref)">
-        <div class="mono" style="font-size:11px">${esc(verdict.a)} vs ${esc(verdict.b)} → <b>${esc(verdict.winner)}</b></div>
+      state.pairwise.map((verdict) => {
+        const drawn = verdict.winner === "tie";
+        const label = drawn
+          ? `<b>draw</b>${verdict.agreed === false ? " (orders disagreed)" : ""}`
+          : `<b>${esc(verdict.winner)}</b>`;
+        return `<div class="rule" style="border-color:var(--ref)">
+        <div class="mono" style="font-size:11px">${esc(verdict.a)} vs ${esc(verdict.b)} &rarr; ${label}${
+          verdict.round != null ? ` <span class="spread">round ${esc(verdict.round)}</span>` : ""}</div>
         <div class="because">${esc(truncate(verdict.reason, 260))}</div>
-      </div>`).join("")
+      </div>`;
+      }).join("")
     : "";
 }
 
@@ -2019,12 +2176,6 @@ function renderStaged() {
   });
 }
 
-function select(id) {
-  state.selected = id;
-  renderJudges();
-  renderDetail();
-}
-
 function anchorOf(finding) {
   const start = num(finding.bar_start);
   const end = num(finding.bar_end);
@@ -2033,87 +2184,6 @@ function anchorOf(finding) {
   else if (start !== null) span = `bar ${start}`;
   else span = "whole piece";
   return finding.track ? `${span}, ${finding.track}` : span;
-}
-
-function renderDetail() {
-  const entry = state.selected ? state.candidates.get(state.selected) : null;
-  const media = el("detail-media");
-  const body = el("detail-body");
-
-  if (!entry) {
-    if (state.detailMediaKey !== "") { media.innerHTML = ""; state.detailMediaKey = ""; }
-    body.innerHTML = '<div class="empty">Nothing selected. Click a candidate column in the judge panel.</div>';
-    el("detail-hint").textContent = "click a candidate column or a score";
-    return;
-  }
-
-  // Rebuilt only when the media actually changes: blowing this away on every
-  // event would restart the audio element mid-listen.
-  const key = [entry.id, entry.media.roll, entry.media.audio, entry.media.midi, entry.media.program].join("|");
-  if (key !== state.detailMediaKey) {
-    state.detailMediaKey = key;
-    const rollUrl = fileUrl(entry.media.roll);
-    const audioUrl = fileUrl(entry.media.audio);
-    const links = [
-      entry.media.program ? `<a href="${fileUrl(entry.media.program)}" target="_blank" rel="noreferrer">program.py</a>` : null,
-      entry.media.midi ? `<a href="${fileUrl(entry.media.midi)}" target="_blank" rel="noreferrer">MIDI</a>` : null,
-      ...entry.media.extras.map((path) => `<a href="${fileUrl(path)}" target="_blank" rel="noreferrer">${esc(path.split("/").pop())}</a>`),
-    ].filter(Boolean);
-
-    media.innerHTML = `<div class="detail-media">
-      <div>${rollUrl
-        ? `<a href="${rollUrl}" target="_blank" rel="noreferrer"><img src="${rollUrl}" alt="piano roll for ${esc(entry.id)}"></a>`
-        : '<div class="empty">No piano roll rendered yet.</div>'}</div>
-      <div>
-        <div class="row" style="gap:6px;margin-bottom:8px">
-          <span class="chip ${entry.isReference ? "warn" : "live"}"><i class="dot"></i>${esc(entry.id)}</span>
-          ${entry.team ? `<span class="chip">${esc(entry.team)}</span>` : ""}
-          ${entry.round != null ? `<span class="chip">round ${esc(entry.round)}</span>` : ""}
-          ${entry.isReference ? '<span class="pin">reference</span>' : ""}
-        </div>
-        ${audioUrl ? `<audio controls preload="none" src="${audioUrl}"></audio>`
-                   : '<div class="hint">No audio rendered yet.</div>'}
-        <div class="row" style="margin-top:10px">${links.join(" · ") || '<span class="hint">no files yet</span>'}</div>
-      </div>
-    </div>`;
-  }
-
-  const dimensions = (state.config && state.config.dimensions) || [];
-  const scores = [...entry.verdicts.values()].map((verdict) => verdict.score).filter((score) => score != null);
-  const mean = scores.length ? (scores.reduce((a, b) => a + b, 0) / scores.length) : null;
-  el("detail-hint").textContent = mean === null
-    ? `${entry.id} · no scores yet`
-    : `${entry.id} · mean ${mean.toFixed(2)} across ${scores.length} dimension${scores.length === 1 ? "" : "s"}`;
-
-  const blocks = dimensions.map((dimension) => {
-    const verdict = entry.verdicts.get(dimension.key);
-    if (!verdict) return "";
-    const spread = verdict.spread != null
-      ? verdict.spread
-      : (verdict.samples.length > 1 ? Math.max(...verdict.samples) - Math.min(...verdict.samples) : null);
-    const findings = verdict.findings.map((finding) => `<div class="finding">
-      <div class="row" style="gap:8px">
-        <span class="anchor">${esc(anchorOf(finding))}</span>
-        <span class="sev ${esc(String(finding.severity || "minor"))}">${esc(finding.severity || "minor")}</span>
-        ${finding.attributed_role ? `<span class="chip">${esc(finding.attributed_role)}</span>` : ""}
-      </div>
-      <div>${esc(finding.claim || "")}</div>
-      ${finding.suggested_revision ? `<div class="fix">→ ${esc(finding.suggested_revision)}</div>` : ""}
-    </div>`).join("");
-
-    return `<div class="dimblock">
-      <div class="row" style="gap:8px">
-        <span class="score" style="background:${scoreColor(verdict.score)}">${esc(verdict.score == null ? "-" : verdict.score)}</span>
-        <b>${esc(dimension.title)}</b>
-        ${spread ? `<span class="spread">spread ±${esc(spread)}</span>` : ""}
-        ${verdict.samples.length > 1 ? `<span class="spread">samples ${esc(verdict.samples.join(", "))}</span>` : ""}
-      </div>
-      ${verdict.rationale ? `<div class="rationale">${esc(verdict.rationale)}</div>` : ""}
-      ${findings || '<div class="hint" style="margin-top:5px">no findings</div>'}
-    </div>`;
-  }).join("");
-
-  body.innerHTML = blocks || '<div class="empty">No verdicts for this candidate yet.</div>';
 }
 
 function appendFeed(event) {
@@ -2135,7 +2205,7 @@ function appendFeed(event) {
 
 function updateControls() {
   const busy = !!state.runId && !state.finished && (state.streamState === "live" || state.streamState === "replaying" || state.streamState === "reconnecting");
-  for (const id of ["f-prompt", "f-teams", "f-rounds", "f-reference", "f-model", "f-budget", "f-key", "btn-start"]) {
+  for (const id of ["f-prompt", "f-teams", "f-rounds", "f-bars", "f-model", "f-budget", "f-key", "btn-start"]) {
     const node = el(id);
     if (node) node.disabled = busy;
   }

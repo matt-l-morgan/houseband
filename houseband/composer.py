@@ -63,32 +63,31 @@ RENDER_TOOL = {
 
 
 # Three teams with genuinely different aesthetics. Diversity is the point: three
-# agents with the same taste produce three of the same piece, and the Elo
-# separation the whole run exists to show never appears.
+# agents with the same taste hand in three versions of the same clip, and the
+# variety a producer is shopping for never appears.
 PERSONAS: dict[str, str] = {
     "conservatory": (
-        "You are a formally trained composer. You think in terms of motivic "
-        "development, voice leading, and harmonic function. A theme should return "
-        "transformed rather than merely repeated. You care about inner voices and "
-        "you avoid parallel fifths and octaves between outer parts unless the idiom "
-        "calls for them. Your risk is writing something correct but bloodless, so "
-        "make sure the piece has a pulse and a hook, not only good grammar."
+        "You are a formally trained musician. You think in voice leading, harmonic "
+        "function and motivic economy, and you would rather a four-bar idea be "
+        "genuinely well-made than merely busy. You care about inner voices and how "
+        "parts move against each other. Your risk is handing in something correct "
+        "but bloodless, so make sure the clip has a pulse and a hook a producer "
+        "would want to loop, not just good grammar."
     ),
     "crate": (
         "You are a producer with a crate-digger's ear. You think groove first: "
-        "pocket, syncopation, the space between hits. You build from a rhythmic "
-        "core outward, you like extended and rootless voicings, and you would "
-        "rather a part be simple and sit right than be clever. Your risk is "
-        "writing eight great bars and looping them, so make sure the piece "
-        "actually develops and goes somewhere across its full length."
+        "pocket, syncopation, the space between hits. You build from a rhythmic core "
+        "outward, you like extended and rootless voicings, and you would rather a "
+        "part be simple and sit right than be clever. This job suits you, so your "
+        "risk is the opposite one: do not let the groove be the only idea, and give "
+        "the harmony something worth building on."
     ),
     "arena": (
-        "You are an arranger who writes for scale. You think in dynamics and "
-        "instrumentation tiers: what enters when, what drops out to make the next "
-        "entry land, where the roof comes off. You want a hook that a crowd could "
-        "sing and a climax that is clearly the climax. Your risk is being loud and "
-        "undifferentiated throughout, so protect the quiet sections that make the "
-        "big ones work."
+        "You are an arranger with a sense of scale. You think about weight, "
+        "register and how a small number of parts can sound enormous. You want a "
+        "hook big enough to carry a room. Your risk here is filling everything: a "
+        "clip with no space in it leaves the producer nowhere to put the vocal, so "
+        "make the impact come from placement and register rather than from density."
     ),
 }
 
@@ -119,8 +118,7 @@ def build_system_prompt(
     criteria: str,
     playbook: str,
     learned_helpers: list[str] | None = None,
-    mode: str = "starter",
-    profile: cfg.ModeProfile | None = None,
+    profile: cfg.SnippetProfile | None = None,
 ) -> list[dict]:
     """Assemble the composer's system prompt as cacheable blocks.
 
@@ -128,17 +126,10 @@ def build_system_prompt(
     role instructions, which are byte-identical across every team and every
     round. The per-team persona and playbook come after, since those change.
 
-    The role instructions differ by mode because the two jobs genuinely conflict:
-    a long-form piece is rewarded for developing and arriving somewhere, and a
-    starter is rewarded for looping cleanly and leaving space. Handing a composer
-    the long-form brief and then judging it on headroom would be unfair, and
-    handing it both would just be confusing.
     """
     library = _read_prompt("house_library.md")
-    role = _read_prompt(
-        "composer_starter.md" if mode == "starter" else "composer_system.md"
-    )
-    profile = profile or cfg.profile_for(mode)
+    role = _read_prompt("composer_system.md")
+    profile = profile or cfg.profile_for()
 
     helpers_note = ""
     if learned_helpers:
@@ -161,7 +152,7 @@ def build_system_prompt(
             "type": "text",
             "text": (
                 f"# Your sensibility\n\n{PERSONAS.get(team, '')}\n\n"
-                f"# Length\n\n{_length_instruction(profile)}\n\n"
+                f"# Length\n\n{profile.length_instruction()}\n\n"
                 f"# The brief\n\n{brief.render()}\n\n"
                 f"# Structural criteria for this genre\n\n{criteria}\n\n"
                 f"# Your playbook\n\n{playbook or '(empty: this is your first round)'}"
@@ -170,19 +161,6 @@ def build_system_prompt(
     ]
 
 
-def _length_instruction(profile: cfg.ModeProfile) -> str:
-    """Spell out the bar count, because "about 30 seconds" is not actionable.
-
-    A composer works in bars and cannot know what a second is until it has chosen
-    a tempo, so the requirement is stated in bars and the duration is given as a
-    consequence rather than as the target.
-    """
-    if not profile.bars:
-        return profile.length_instruction
-    text = profile.length_instruction.format(
-        bars=profile.bars, last=profile.bars - 1
-    )
-    return f"{text}\n\nAt a typical tempo that is {profile.approx_seconds}."
 
 
 # How often to surface partial progress from a streaming turn. Composer turns run
@@ -288,7 +266,6 @@ def _handle_render(
     code: str,
     workdir: Path,
     config: cfg.Config,
-    reference_midis: list[Path],
     expect_bars: int | None = None,
 ) -> tuple[str, render.ProgramResult]:
     """Execute a program and turn the outcome into feedback the agent can act on."""
@@ -296,7 +273,7 @@ def _handle_render(
     if not result.ok:
         return result.feedback(), result
 
-    gate = validator.gate(result.midi_path, result.sidecar_path, reference_midis)
+    gate = validator.gate(result.midi_path, result.sidecar_path)
     summary = score_text.render(
         result.midi_path, result.sidecar_path, include_notes=False
     )
@@ -360,12 +337,10 @@ def compose(
     round: int = 0,
     client=None,
     config: cfg.Config | None = None,
-    reference_midis: list[Path] | None = None,
     max_turns: int | None = None,
     learned_helpers: list[str] | None = None,
     budget_remaining: int | None = None,
-    mode: str = "starter",
-    profile: cfg.ModeProfile | None = None,
+    profile: cfg.SnippetProfile | None = None,
 ) -> ComposerResult:
     """Run one composer to a submitted piece, or to exhaustion.
 
@@ -373,14 +348,13 @@ def compose(
     produce one is a normal outcome that the round absorbs, not an exception.
     """
     config = config or cfg.load()
-    profile = profile or cfg.profile_for(mode)
+    profile = profile or cfg.profile_for()
     # The profile owns effort, turn count and token ceiling, because those three
     # move together: a starter is cheap and fast precisely because it thinks less
     # and revises less, and letting a caller set one without the others produces
     # combinations nobody intended.
     if max_turns is None:
         max_turns = profile.max_turns
-    reference_midis = reference_midis or []
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
 
@@ -390,23 +364,15 @@ def compose(
         client = anthropic.Anthropic()
 
     system = build_system_prompt(
-        team, brief, criteria, playbook, learned_helpers, mode=mode, profile=profile
+        team, brief, criteria, playbook, learned_helpers, profile=profile
     )
     messages: list[dict] = [
         {
             "role": "user",
             "content": (
-                (
-                    f"Write the {profile.bars}-bar starter. Call render_midi with a "
-                    "complete program, read the feedback, revise at most once, then "
-                    "stop calling tools and describe what the producer is getting."
-                )
-                if profile.bars
-                else (
-                    "Write the piece. Call render_midi when you have a complete "
-                    "program, read the feedback, and revise until you are satisfied. "
-                    "Then stop calling tools and describe what you wrote."
-                )
+                f"Write the {profile.bars}-bar clip. Call render_midi with a "
+                "complete program, read the feedback, revise at most once, then "
+                "stop calling tools and describe what the producer is getting."
             ),
         }
     ]
@@ -416,7 +382,7 @@ def compose(
 
     best: render.ProgramResult | None = None
     best_code = ""
-    expect_bars = profile.bars or None
+    expect_bars = profile.bars
 
     for turn in range(max_turns):
         result.turns = turn + 1
@@ -523,7 +489,7 @@ def compose(
             )
 
             feedback, program_result = _handle_render(
-                code, workdir, config, reference_midis, expect_bars=expect_bars
+                code, workdir, config, expect_bars=expect_bars
             )
             if program_result.ok:
                 best, best_code = program_result, code

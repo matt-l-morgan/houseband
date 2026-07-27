@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """Does the judge panel actually discriminate?
 
-This is the gate the whole system rests on. Everything downstream (the Elo
-trend, the coach's rules, the claim that agents improve) is built on the
-assumption that these rubrics can tell good music from bad. If they cannot, then
-a rising score across rounds means nothing, and it is far better to find that out
-here than after reading three rounds of noise as progress.
+This is the gate the whole system rests on. Everything downstream (the Elo trend,
+the coach's rules, the claim that agents improve) is built on the assumption that
+these rubrics can tell good music from bad. If they cannot, then a rising score
+across rounds means nothing, and it is far better to find that out here than
+after reading three rounds of noise as progress.
 
-The test is deliberately blunt: score a competent hand-written piece and a
-deliberately terrible one, blind, through the full eight-dimension panel. The
-competent piece should win on every dimension, and by a clear margin on the
+The test is deliberately blunt: score a competent hand-written clip and a
+deliberately terrible one, blind, through the full nine-dimension panel. The
+competent one should win on every dimension, and by a clear margin on the
 structural ones. A panel that cannot separate these two is not going to separate
 three agent submissions from each other.
 
-    python scripts/calibration_check.py                  # good vs bad
-    python scripts/calibration_check.py --reference X.mid # include a real piece
+    python scripts/calibration_check.py
 
-Adding a real reference from ``references/`` makes the check much stronger: a real
-recording should beat both. That is the version worth trusting.
+This used to accept ``--reference`` and drop a commercial recording into the
+blind pool as a third, higher anchor. That went with the rest of the reference
+machinery, and it was not the loss it sounds like: a transcription of a
+six-minute song is not a 16-bar loop, so it lost on prompt adherence and loop
+usability however good the panel was, and reading that as "the judges are broken"
+was the wrong conclusion. Competent versus bad is the comparison that actually
+tests the rubrics.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from houseband import config as cfg  # noqa: E402
+from houseband import criteria as criteria_mod  # noqa: E402
 from houseband import render, score_text  # noqa: E402
 from houseband.events import EventLog  # noqa: E402
 from houseband.judges import run_panel  # noqa: E402
@@ -42,13 +47,27 @@ from houseband.types import (  # noqa: E402
     Candidate,
 )
 
-# The dimensions where the gap should be unmistakable. A bad piece can accidentally
-# score adequately on, say, harmony (a I-IV-V loop is not *wrong*), but it cannot
-# accidentally have good form.
-STRUCTURAL = ("form_arrangement", "melody", "rhythm_groove", "orchestration_register")
+# The dimensions where the gap should be unmistakable. A bad clip can accidentally
+# score adequately on harmony (a I-IV-V loop is not *wrong*) but it cannot
+# accidentally groove, loop cleanly, or sit in sensible registers.
+STRUCTURAL = (
+    "rhythm_groove",
+    "loop_usability",
+    "melody",
+    "harmony_voice_leading",
+    "orchestration_register",
+)
 
 # Minimum mean gap on the structural dimensions for the panel to be trusted.
 REQUIRED_STRUCTURAL_GAP = 2.0
+
+# These are keys into the live dimension list, so a rename has to break here
+# loudly rather than degrade into a gate that silently measures fewer things.
+if not set(STRUCTURAL) <= set(DIMENSIONS):
+    raise SystemExit(
+        "calibration_check.STRUCTURAL names dimensions that no longer exist: "
+        + ", ".join(sorted(set(STRUCTURAL) - set(DIMENSIONS)))
+    )
 
 
 def _build(path: Path, candidate_id: str, out_dir: Path, config: cfg.Config) -> Candidate:
@@ -72,73 +91,8 @@ def _build(path: Path, candidate_id: str, out_dir: Path, config: cfg.Config) -> 
     )
 
 
-def _from_midi(path: Path, candidate_id: str, out_dir: Path, config: cfg.Config) -> Candidate:
-    artifacts = render.render_all(
-        path, out_dir / candidate_id, stem=candidate_id, config=config
-    )
-    return Candidate(
-        candidate_id=candidate_id,
-        team="reference",
-        midi_path=path,
-        score_text=score_text.render(path),
-        piano_roll=artifacts.piano_roll,
-        audio=artifacts.audio,
-        is_reference=True,
-    )
-
-
-def _reference_health(midi_path: Path) -> list[str]:
-    """Flag transcription artifacts that make a reference unfair to score.
-
-    Community MIDI is usually transcribed for pitch and rhythm and not for
-    performance, so dynamics and stereo placement are frequently absent. A judge
-    reading that file is right to mark down production and groove, but the piece
-    it was transcribed from does not deserve it. Naming the cause here is the
-    difference between "the judges are broken" and "this anchor cannot be scored
-    on dynamics".
-    """
-    import pretty_midi
-
-    notes: list[int] = []
-    pans: list[int] = []
-    try:
-        midi = pretty_midi.PrettyMIDI(str(midi_path))
-    except Exception as exc:
-        return [f"could not re-read the reference to check it: {exc}"]
-
-    for inst in midi.instruments:
-        notes += [n.velocity for n in inst.notes]
-        pans += [cc.value for cc in inst.control_changes if cc.number == 10]
-
-    problems: list[str] = []
-    if notes:
-        spread = max(notes) - min(notes)
-        if spread <= 16:
-            problems.append(
-                f"velocities span only {spread} of 127 (min {min(notes)}, max {max(notes)}): "
-                "this transcription encodes no dynamics, so production and rhythm "
-                "scores for it are not meaningful"
-            )
-    if not pans or len(set(pans)) <= 1:
-        problems.append(
-            "every track is panned to the same position, so orchestration and "
-            "production have no stereo image to reward"
-        )
-    if not problems:
-        problems.append(
-            "no obvious transcription artifact found, so this may be a genuine "
-            "rubric problem rather than a bad anchor"
-        )
-    return problems
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--reference",
-        default=None,
-        help="Filename in references/ to include. Strongly recommended.",
-    )
     parser.add_argument("--out", default="runs/calibration")
     args = parser.parse_args(argv)
 
@@ -164,30 +118,18 @@ def main(argv: list[str] | None = None) -> int:
     candidates = [good, bad]
     labels = {"cA": "competent", "cB": "deliberately bad"}
 
-    if args.reference:
-        path = config.references_dir / args.reference
-        if not path.exists():
-            print(f"reference not found: {path}", file=sys.stderr)
-            return 2
-        reference = _from_midi(path, "cC", out_dir, config)
-        candidates.append(reference)
-        labels["cC"] = f"real ({args.reference})"
-
     print(f"judging {len(candidates)} candidates on {len(DIMENSIONS)} dimensions...\n")
+    # The same brief and criteria a real run builds, so the gate tests the rubrics
+    # under the conditions they actually operate in.
+    profile = cfg.profile_for()
     brief = Brief(
-        prompt="A long-form rock piece that builds through several instrumentation "
-        "tiers, with a quiet passage before a final climax.",
+        prompt="A loopable rock clip built on a guitar riff, with drums and bass "
+        "locked to it and space left for a vocal.",
         genre="rock",
-        target_length="4 to 7 minutes",
-        structure_notes="Building arrangement, bare opening, climax in the final third.",
+        target_length=f"{profile.bars} bars, {profile.approx_seconds}",
+        structure_notes="One continuous idea that loops cleanly. No intro, no outro.",
     )
-    criteria_text = (
-        "- Build through at least three distinct instrumentation tiers.\n"
-        "- Include a passage reduced to one or two instruments.\n"
-        "- Place the densest passage in the final third.\n"
-        "- No more than half the sounding bars should be exact repeats.\n"
-        "- Vary velocity within and between sections.\n"
-    )
+    criteria_text = criteria_mod.for_brief(brief, profile)
 
     verdicts = run_panel(candidates, brief, criteria_text, config=config, log=log)
 
@@ -225,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             scores[candidate.candidate_id] = scored.score if scored else None
             cell = "-" if scored is None else str(scored.score)
             if scored and scored.spread:
-                cell += f" (±{scored.spread})"
+                cell += f" (+/-{scored.spread})"
             row += f"{cell:>18}"
         print(row)
 
@@ -254,20 +196,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"mean gap (structural dimensions): {mean_structural:+.2f}  "
           f"(need >= {REQUIRED_STRUCTURAL_GAP})")
 
-    if args.reference and "cC" in verdicts:
-        ref_total = verdicts["cC"].weighted_total
-        good_total = verdicts["cA"].weighted_total
-        print(f"\nreal reference vs competent:      {ref_total:.2f} vs {good_total:.2f}")
-        if ref_total <= good_total:
-            print(
-                "  A hand-written test piece matched or beat a real recording.\n"
-                "  Before blaming the rubrics, check the reference itself: the two\n"
-                "  usual causes are a transcription that encoded no dynamics, and a\n"
-                "  brief the reference was never written to satisfy."
-            )
-            for line in _reference_health(candidates[-1].midi_path):
-                print(f"    - {line}")
-
     ok = not losses and mean_structural >= REQUIRED_STRUCTURAL_GAP
     print()
     if ok:
@@ -276,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         print("GATE FAILED.")
         if losses:
             print(
-                "  The bad piece matched or beat the competent one on: "
+                "  The bad clip matched or beat the competent one on: "
                 + ", ".join(DIMENSION_TITLES[d] for d in losses)
             )
         if mean_structural < REQUIRED_STRUCTURAL_GAP:

@@ -8,10 +8,9 @@ would be expensive to discover from a live run:
 
 * median-of-3 reduces to the median and keeps the spread
 * a pair whose two presentation orders disagree is recorded as a draw
-* a pinned reference's rating never moves
-* an agent beating the reference structurally fails calibration loudly
+* Elo is conserved, so a round's ranking is readable
 * an unreachable judge produces a neutral verdict instead of killing the round
-* the judge is never shown the team name or the reference flag
+* the judge is never shown the team name
 """
 
 from __future__ import annotations
@@ -21,8 +20,10 @@ import pytest
 
 from houseband import config as cfg
 from houseband.events import EventLog
-from houseband.judges import calibration, elo, pairwise, rubric
+from houseband.judges import elo, pairwise, rubric
 from houseband.types import (
+    DIMENSION_TITLES,
+    DIMENSIONS,
     Brief,
     Candidate,
     CandidateVerdict,
@@ -30,6 +31,14 @@ from houseband.types import (
     Finding,
     PairwiseVerdict,
     ScoredDimension,
+)
+
+# One judged candidate costs one call per dimension, except the median-sampled
+# ones which cost cfg.MEDIAN_SAMPLES each. Derived rather than hardcoded so that
+# adding a dimension or changing the sampling does not silently invalidate the
+# test that is meant to pin the call count.
+CALLS_PER_CANDIDATE = len(DIMENSIONS) + len(cfg.MEDIAN_SAMPLED_DIMENSIONS) * (
+    cfg.MEDIAN_SAMPLES - 1
 )
 
 # ---------------------------------------------------------------------------
@@ -251,7 +260,7 @@ def test_whole_panel_survives_a_dead_client(candidate):
         candidate, BRIEF, CRITERIA, client=client, config=StubConfig()
     )
 
-    assert len(verdict.dimensions) == 8
+    assert len(verdict.dimensions) == len(DIMENSIONS)
     assert {d.score for d in verdict.dimensions} == {5}
     assert verdict.weighted_total == pytest.approx(5.0)
 
@@ -277,7 +286,7 @@ def test_present_piano_roll_becomes_a_base64_image_block(candidate, tmp_path):
 
     rubric.judge_dimension(
         candidate,
-        "form_arrangement",
+        "loop_usability",
         BRIEF,
         CRITERIA,
         client=client,
@@ -304,7 +313,6 @@ def test_judge_never_sees_the_team_or_the_reference_flag(tmp_path):
         team="reference",
         midi_path=_midi(tmp_path / "ref.mid"),
         score_text="KEY D minor   TIME 4/4   BPM 80   BARS 48",
-        is_reference=True,
     )
     client = StubClient([_verdict(8)])
 
@@ -316,7 +324,6 @@ def test_judge_never_sees_the_team_or_the_reference_flag(tmp_path):
     rendered = repr(call["system"]) + repr(call["messages"])
     assert "c0" in rendered
     assert "reference" not in rendered.lower()
-    assert "is_reference" not in rendered
 
 
 def test_system_prompt_caches_the_stable_prefix(candidate):
@@ -373,8 +380,12 @@ def test_run_panel_keys_by_candidate_id_and_preserves_dimension_order(tmp_path):
         )
         for i in range(2)
     ]
-    # 8 dimensions, 3 of them sampled 3 times: 14 calls per candidate.
-    client = StubClient([_verdict(6) for _ in range(28)])
+    # Derived, not hardcoded: the dimension set and the sampled subset have both
+    # changed under this test before, and a literal here fails as a stub that runs
+    # dry rather than as the mismatch it actually is.
+    client = StubClient(
+        [_verdict(6) for _ in range(2 * CALLS_PER_CANDIDATE)]
+    )
     log = EventLog(tmp_path / "events.jsonl")
 
     verdicts = rubric.run_panel(
@@ -382,14 +393,12 @@ def test_run_panel_keys_by_candidate_id_and_preserves_dimension_order(tmp_path):
     )
 
     assert set(verdicts) == {"c0", "c1"}
-    from houseband.types import DIMENSIONS
-
     assert [d.dimension for d in verdicts["c0"].dimensions] == list(DIMENSIONS)
-    assert len(client.calls) == 28
+    assert len(client.calls) == 2 * CALLS_PER_CANDIDATE
 
     events = _read(log)
-    assert sum(1 for e in events if e.kind == "judge.started") == 16
-    assert sum(1 for e in events if e.kind == "judge.verdict") == 28
+    assert sum(1 for e in events if e.kind == "judge.started") == 2 * len(DIMENSIONS)
+    assert sum(1 for e in events if e.kind == "judge.verdict") == 2 * CALLS_PER_CANDIDATE
     # Usage is attached so the cost readout and the budget guard both work.
     assert all(e.usage is not None for e in events if e.kind == "judge.verdict")
 
@@ -541,12 +550,9 @@ class KeyedPairwiseClient:
         self.messages = Messages()
 
 
-def test_tournament_pins_the_reference_and_rates_everyone(tmp_path):
-    reference = Candidate(
-        candidate_id="c0",
-        team="reference",
-        midi_path=_midi(tmp_path / "ref.mid", 24),
-        is_reference=True,
+def test_tournament_rates_everyone_and_reconciles_position_bias(tmp_path):
+    strong = Candidate(
+        candidate_id="c0", team="gamma", midi_path=_midi(tmp_path / "c.mid", 24)
     )
     agent_a = Candidate(
         candidate_id="c1", team="alpha", midi_path=_midi(tmp_path / "a.mid", 8)
@@ -555,9 +561,9 @@ def test_tournament_pins_the_reference_and_rates_everyone(tmp_path):
         candidate_id="c2", team="beta", midi_path=_midi(tmp_path / "b.mid", 12)
     )
 
-    # Three pairs, two orders each. The reference wins both of its pairs in both
-    # orders; the two agents get a slot-A preference in both orders, which is
-    # position bias and must reconcile to a draw.
+    # Three pairs, two orders each. c0 wins both of its pairs in both orders, so
+    # that is a real preference; c1 and c2 each get a slot-A preference in both
+    # orders, which is position bias and must reconcile to a draw.
     client = KeyedPairwiseClient(
         {
             ("c0", "c1"): "A",
@@ -571,7 +577,7 @@ def test_tournament_pins_the_reference_and_rates_everyone(tmp_path):
     log = EventLog(tmp_path / "events.jsonl")
 
     ratings = pairwise.tournament(
-        [agent_b, reference, agent_a],
+        [agent_b, strong, agent_a],
         BRIEF,
         CRITERIA,
         client=client,
@@ -580,9 +586,9 @@ def test_tournament_pins_the_reference_and_rates_everyone(tmp_path):
     )
 
     assert len(client.calls) == 6
-    assert ratings["c0"] == elo.REFERENCE_RATING  # pinned, despite two wins
-    # Both agents lost to the reference and drew with each other, so both sit
-    # below the starting rating and neither is separated from the other.
+    assert ratings["c0"] > elo.DEFAULT_RATING  # won both pairs, both orders
+    # Both lost to c0 and drew with each other, so both sit below the starting
+    # rating and neither is separated from the other.
     assert ratings["c1"] < elo.DEFAULT_RATING
     assert ratings["c2"] < elo.DEFAULT_RATING
     assert ratings["c1"] == pytest.approx(ratings["c2"], abs=1.5)
@@ -593,55 +599,74 @@ def test_tournament_pins_the_reference_and_rates_everyone(tmp_path):
 # Elo
 # ---------------------------------------------------------------------------
 
-
-def test_pinned_reference_rating_is_unchanged_by_update():
-    ratings = {"ref": elo.REFERENCE_RATING, "team": elo.DEFAULT_RATING}
-
-    elo.update(ratings, "ref", "team", 1.0, pinned={"ref"})
-    assert ratings["ref"] == elo.REFERENCE_RATING
-    assert ratings["team"] < elo.DEFAULT_RATING
-
-    # And unchanged when it loses, which is the case that would otherwise drag
-    # the whole scale down over rounds.
-    before = ratings["team"]
-    elo.update(ratings, "ref", "team", 0.0, pinned={"ref"})
-    assert ratings["ref"] == elo.REFERENCE_RATING
-    assert ratings["team"] > before
+# These tests used to cover a pinned reference whose rating never moved, which
+# gave the pool an absolute yardstick. References were removed from the tool, so
+# Elo is plain zero-sum again: it ranks within a round and says little across
+# them. The absolute measure is the weighted rubric total, whose anchors are
+# written descriptors, and that is covered in test_snippet_judging.py.
 
 
-def test_pinned_side_does_not_absorb_its_opponents_points():
-    """The opponent moves by the full amount; ratings are not zero-sum here."""
-    ratings = {"ref": elo.REFERENCE_RATING, "team": elo.DEFAULT_RATING}
-    expected_team = elo.expected(elo.DEFAULT_RATING, elo.REFERENCE_RATING)
+def test_a_win_moves_both_sides_by_the_same_amount():
+    """Zero-sum is the property that replaced pinning, so it is worth asserting
+    rather than assuming: the points the winner gains are the points the loser
+    drops, and the pool total is conserved."""
+    ratings = {"a": elo.DEFAULT_RATING, "b": elo.DEFAULT_RATING}
+    before = sum(ratings.values())
 
-    elo.update(ratings, "team", "ref", 1.0, k=32.0, pinned={"ref"})
+    elo.update(ratings, "a", "b", 1.0)
 
-    assert ratings["team"] == pytest.approx(
-        elo.DEFAULT_RATING + 32.0 * (1.0 - expected_team)
-    )
+    assert ratings["a"] > elo.DEFAULT_RATING
+    assert ratings["b"] < elo.DEFAULT_RATING
+    assert sum(ratings.values()) == pytest.approx(before)
+
+
+def test_beating_a_stronger_opponent_is_worth_more():
+    underdog = {"weak": 1000.0, "strong": 1400.0}
+    evens = {"weak": 1200.0, "strong": 1200.0}
+
+    elo.update(underdog, "weak", "strong", 1.0, k=32.0)
+    elo.update(evens, "weak", "strong", 1.0, k=32.0)
+
+    assert underdog["weak"] - 1000.0 > evens["weak"] - 1200.0
+
+
+def test_a_draw_between_equals_moves_nothing():
+    ratings = {"a": elo.DEFAULT_RATING, "b": elo.DEFAULT_RATING}
+    elo.update(ratings, "a", "b", 0.5)
+    assert ratings["a"] == pytest.approx(elo.DEFAULT_RATING)
+    assert ratings["b"] == pytest.approx(elo.DEFAULT_RATING)
 
 
 def test_run_ratings_is_deterministic_regardless_of_result_order():
+    """The comparisons that produce these results run concurrently, so without
+    sorting, rerunning a round on the same verdicts could produce different
+    ratings purely from thread scheduling."""
     results = [
         ("c1", "c2", 1.0),
         ("c0", "c1", 1.0),
         ("c0", "c2", 0.5),
     ]
-    first = elo.run_ratings(results, pinned={"c0"})
-    second = elo.run_ratings(list(reversed(results)), pinned={"c0"})
+    first = elo.run_ratings(results)
+    second = elo.run_ratings(list(reversed(results)))
 
     assert first == second
-    assert first["c0"] == elo.REFERENCE_RATING
     assert first["c1"] > first["c2"]
 
 
-def test_unrated_competitors_start_at_the_defaults():
-    ratings = elo.run_ratings([], pinned={"ref"})
-    assert ratings == {"ref": elo.REFERENCE_RATING}
+def test_unrated_competitors_start_at_the_default():
+    assert elo.run_ratings([]) == {}
 
     ratings = elo.run_ratings([("a", "b", 0.5)])
     assert ratings["a"] == pytest.approx(elo.DEFAULT_RATING)
     assert ratings["b"] == pytest.approx(elo.DEFAULT_RATING)
+
+
+def test_initial_ratings_are_carried_in():
+    """How a team's rating survives across rounds: the id it is given is
+    reshuffled every round, so the loop passes last round's rating back in."""
+    ratings = elo.run_ratings([("a", "b", 1.0)], initial={"a": 1300.0, "b": 1100.0})
+    assert ratings["a"] > 1300.0
+    assert ratings["b"] < 1100.0
 
 
 def test_expected_score_is_symmetric_and_favours_the_higher_rating():
@@ -650,162 +675,6 @@ def test_expected_score_is_symmetric_and_favours_the_higher_rating():
         1.0 - elo.expected(1200.0, 1600.0)
     )
     assert elo.expected(1600.0, 1200.0) > 0.9
-
-
-# ---------------------------------------------------------------------------
-# Calibration
-# ---------------------------------------------------------------------------
-
-
-def _candidate_verdict(
-    candidate_id: str,
-    team: str,
-    scores: dict[str, int],
-    is_reference: bool = False,
-    samples: dict[str, list[int]] | None = None,
-) -> CandidateVerdict:
-    samples = samples or {}
-    return CandidateVerdict(
-        candidate_id=candidate_id,
-        team=team,
-        is_reference=is_reference,
-        dimensions=[
-            ScoredDimension(
-                dimension=dimension,
-                score=score,
-                rationale="scripted",
-                samples=samples.get(dimension, [score]),
-            )
-            for dimension, score in scores.items()
-        ],
-    )
-
-
-STRUCTURAL_REFERENCE = {"form_arrangement": 8, "melody": 8, "harmony_voice_leading": 7}
-
-
-def test_calibration_passes_when_the_reference_leads():
-    verdicts = {
-        "c0": _candidate_verdict("c0", "reference", STRUCTURAL_REFERENCE, is_reference=True),
-        "c1": _candidate_verdict(
-            "c1",
-            "alpha",
-            {"form_arrangement": 4, "melody": 5, "harmony_voice_leading": 6},
-        ),
-    }
-
-    report = calibration.check_calibration(verdicts)
-
-    assert report.ok is True
-    assert report.has_reference is True
-    assert report.breaches == []
-    assert report.reference_id == "c0"
-    assert report.agent_count == 1
-    assert "Calibration OK" in report.summary()
-
-
-def test_calibration_flags_an_agent_beating_the_reference():
-    verdicts = {
-        "c0": _candidate_verdict("c0", "reference", STRUCTURAL_REFERENCE, is_reference=True),
-        "c1": _candidate_verdict(
-            "c1",
-            "alpha",
-            {"form_arrangement": 9, "melody": 5, "harmony_voice_leading": 6},
-        ),
-        "c2": _candidate_verdict(
-            "c2",
-            "beta",
-            {"form_arrangement": 3, "melody": 10, "harmony_voice_leading": 7},
-        ),
-    }
-
-    report = calibration.check_calibration(verdicts)
-
-    assert report.ok is False
-    assert {(b.dimension, b.candidate_id, b.margin) for b in report.breaches} == {
-        ("form_arrangement", "c1", 1),
-        ("melody", "c2", 2),
-    }
-    # c2 equalled the reference on harmony: noted, not a failure.
-    assert [(t.dimension, t.candidate_id) for t in report.ties] == [
-        ("harmony_voice_leading", "c2")
-    ]
-
-    summary = report.summary()
-    assert "CALIBRATION FAILED" in summary
-    assert "alpha" in summary and "beta" in summary
-    assert "Form and arrangement" in summary
-    assert "+2" in summary
-    assert "Do not train the coach on this round" in summary
-
-
-def test_calibration_ignores_non_structural_dimensions():
-    """Production and originality are allowed to go the agent's way."""
-    verdicts = {
-        "c0": _candidate_verdict(
-            "c0",
-            "reference",
-            {**STRUCTURAL_REFERENCE, "production": 5, "originality": 6},
-            is_reference=True,
-        ),
-        "c1": _candidate_verdict(
-            "c1",
-            "alpha",
-            {
-                "form_arrangement": 4,
-                "melody": 5,
-                "harmony_voice_leading": 6,
-                "production": 10,
-                "originality": 10,
-            },
-        ),
-    }
-
-    report = calibration.check_calibration(verdicts)
-
-    assert report.ok is True
-    assert calibration.STRUCTURAL_DIMENSIONS == (
-        "form_arrangement",
-        "melody",
-        "harmony_voice_leading",
-    )
-
-
-def test_calibration_without_a_reference_is_not_a_pass():
-    verdicts = {"c1": _candidate_verdict("c1", "alpha", STRUCTURAL_REFERENCE)}
-
-    report = calibration.check_calibration(verdicts)
-
-    assert report.has_reference is False
-    assert report.ok is False
-    assert "CALIBRATION NOT CHECKED" in report.summary()
-
-
-def test_noise_floor_averages_only_sampled_dimensions():
-    verdicts = {
-        "c0": _candidate_verdict(
-            "c0",
-            "reference",
-            {"melody": 8, "form_arrangement": 8, "harmony_voice_leading": 7, "production": 6},
-            is_reference=True,
-            samples={"melody": [7, 8, 9], "form_arrangement": [8, 8, 8]},
-        ),
-        "c1": _candidate_verdict(
-            "c1",
-            "alpha",
-            {"melody": 5, "form_arrangement": 4, "harmony_voice_leading": 6, "production": 9},
-            samples={"melody": [4, 5, 8], "form_arrangement": [3, 4, 5]},
-        ),
-    }
-
-    report = calibration.check_calibration(verdicts)
-
-    # melody spreads 2 and 4 -> 3.0; form spreads 0 and 2 -> 1.0. Production was
-    # never sampled, so its structural zero must not dilute the measurement.
-    assert report.noise_floor == {"form_arrangement": 1.0, "melody": 3.0}
-    assert "production" not in report.noise_floor
-    assert report.mean_spread == pytest.approx(2.0)
-    assert "not distinguishable from judge noise" in report.summary()
 
 
 # ---------------------------------------------------------------------------

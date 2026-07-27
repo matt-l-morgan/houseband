@@ -6,6 +6,11 @@ the bar) and this module does the conversion to seconds exactly once, correctly.
 That removes the entire class of timing-drift bugs that would otherwise be
 misread downstream as bad musicianship.
 
+The file :meth:`Score.write` produces keeps the musical time as well: notes are
+positioned at ticks computed from bars and beats, and the tempo map is written
+alongside them. That is what makes the bar grid a DAW derives from ``out.mid``
+the same grid the composer wrote against, however much the tempo moves.
+
 Minimal program:
 
     from houseband.house import Score
@@ -31,16 +36,19 @@ from __future__ import annotations
 import bisect
 from dataclasses import dataclass, field
 
+import mido
 import pretty_midi
 
 __all__ = [
     "Score",
     "Track",
     "DrumTrack",
+    "NoteEvent",
     "note_number",
     "chord_pitches",
     "DRUMS",
     "GM",
+    "TICKS_PER_QUARTER",
 ]
 
 
@@ -242,6 +250,80 @@ DRUMS = {
 
 
 # ---------------------------------------------------------------------------
+# MIDI file plumbing
+# ---------------------------------------------------------------------------
+
+# Resolution of every file this module writes. mido spells it ``ticks_per_beat``
+# but the unit is the quarter note, hence the name here. 480 divides by both 3
+# and 4, so 16th triplets and 32nds all land on integer ticks; pretty_midi's own
+# default of 220 does not divide by 3. ``houseband.export`` writes the same
+# number, so a bundle and the ``out.mid`` it came from share one grid.
+TICKS_PER_QUARTER = 480
+
+# General MIDI puts percussion on channel 10 (index 9) and every drum rack looks
+# for it there.
+_DRUM_CHANNEL = 9
+_MELODIC_CHANNELS = [c for c in range(16) if c != _DRUM_CHANNEL]
+
+# Ordering of events that share a tick. Meta before program before controllers
+# before notes, and note-off strictly before note-on so a legato handoff on one
+# pitch does not silence the note that is arriving.
+#
+# This table and the two helpers below mirror the ones in ``houseband.export``.
+# They are duplicated rather than shared because ``export`` sits on top of this
+# module: it imports ``DRUMS`` from here directly, and again by way of
+# ``score_text``. Importing back the other way would be both an import cycle and
+# a layering inversion, with the library composers write against depending on the
+# delivery pipeline. The right end state is ``export`` importing these from here,
+# which is a change for a commit that can touch both files.
+_EVENT_RANK = {
+    "track_name": 0,
+    "time_signature": 1,
+    "set_tempo": 2,
+    "marker": 3,
+    "program_change": 4,
+    "control_change": 5,
+    "note_off": 6,
+    "note_on": 7,
+}
+
+_Event = tuple[int, int, int, "mido.messages.BaseMessage"]
+
+
+def _event(tick: int, message, seq: int) -> _Event:
+    return (tick, _EVENT_RANK.get(message.type, 99), seq, message)
+
+
+def _track_from_events(events: list[_Event]) -> mido.MidiTrack:
+    """Absolute-tick events to a delta-timed mido track.
+
+    The sort key carries an explicit sequence tiebreaker rather than leaning on
+    sort stability, so the same score always produces the same bytes regardless
+    of the order the events happened to be appended in.
+    """
+    track = mido.MidiTrack()
+    previous = 0
+    for tick, _, _, message in sorted(events, key=lambda e: (e[0], e[1], e[2])):
+        track.append(message.copy(time=tick - previous))
+        previous = tick
+    track.append(mido.MetaMessage("end_of_track", time=1 if events else 0))
+    return track
+
+
+def _midi_text(text: str) -> str:
+    """Text a Standard MIDI File can actually hold.
+
+    MIDI text is bytes, and mido encodes it as latin-1, as does pretty_midi when
+    it reads it back. Composer programs are written by a language model, so a
+    curly quote or an em dash in a track or section name is entirely likely, and
+    without this it raises on save and loses the whole write. The sidecar keeps
+    the name exactly as it was declared, so the lossy copy here costs nothing that
+    matters.
+    """
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+# ---------------------------------------------------------------------------
 # Score
 # ---------------------------------------------------------------------------
 
@@ -259,6 +341,24 @@ class Section:
         return self.start_bar + self.bars
 
 
+@dataclass(frozen=True, slots=True)
+class NoteEvent:
+    """One note in the musical time it was written in. ``dur`` is in beats.
+
+    This exists because seconds are a lossy record of musical position. Given a
+    time in seconds and a tempo map you can recover which bar a note is in, but
+    only by replaying the whole map and accepting float error at every bar line,
+    and you cannot recover it at all if the map later changes. The composer told
+    us the bar and the beat, so we keep them.
+    """
+
+    pitch: int
+    bar: int
+    beat: float
+    dur: float
+    velocity: int
+
+
 class Track:
     """A single named instrument line.
 
@@ -272,6 +372,13 @@ class Track:
         self.pan = pan
         self.is_drum = is_drum
         self.notes: list[tuple[int, float, float, int]] = []  # pitch, start_s, end_s, vel
+        # The same notes, in bars and beats. Both are kept on purpose: seconds
+        # are what everything that reads a parsed MIDI file works in (and other
+        # modules duck-type against the tuple shape above), while bars and beats
+        # are what a DAW's bar grid is made of. Deriving either one from the
+        # other after the fact is where timing drift comes from, so neither is
+        # derived.
+        self.events: list[NoteEvent] = []
 
     # -- placement ---------------------------------------------------------
 
@@ -287,9 +394,19 @@ class Track:
         if dur <= 0:
             raise ValueError(f"{self.name}: note at bar {bar} beat {beat} has dur={dur}")
         vel = max(1, min(127, int(vel)))
+        number = note_number(pitch)
         start = self.score.time_at(bar, beat)
         end = self.score.time_at(bar, beat + dur)
-        self.notes.append((note_number(pitch), start, end, vel))
+        self.notes.append((number, start, end, vel))
+        self.events.append(
+            NoteEvent(
+                pitch=number,
+                bar=int(bar),
+                beat=float(beat),
+                dur=float(dur),
+                velocity=vel,
+            )
+        )
         self.score._note_max_bar = max(self.score._note_max_bar, int(bar))
         return self
 
@@ -343,6 +460,66 @@ class Track:
             pretty_midi.ControlChange(number=10, value=max(0, min(127, cc_value)), time=0.0)
         )
         return inst
+
+    def _to_mido_track(self, channel: int) -> mido.MidiTrack:
+        """The track as MIDI events on one channel, positioned in musical ticks.
+
+        Every note is placed by :meth:`Score.tick_at` from the bar and beat it
+        was written at. Nothing here consults the note's seconds, which is the
+        whole point: ticks are musical time, and a tick derived from seconds has
+        the tempo baked into it twice.
+        """
+        events = [_event(0, mido.MetaMessage("track_name", name=_midi_text(self.name)), 0)]
+        events.append(
+            _event(
+                0,
+                mido.Message(
+                    "program_change",
+                    # GM selects the drum kit by channel rather than by program,
+                    # so 0 is the conventional filler on the percussion track.
+                    program=0 if self.is_drum else self.patch,
+                    channel=channel,
+                ),
+                1,
+            )
+        )
+        # Pan as CC10 at tick zero. 0 = hard left, 64 = centre, 127 = hard right.
+        pan_value = max(0, min(127, int(round((self.pan + 1.0) / 2.0 * 127))))
+        events.append(
+            _event(
+                0,
+                mido.Message("control_change", control=10, value=pan_value, channel=channel),
+                2,
+            )
+        )
+
+        seq = 3
+        for note in self.events:
+            start = self.score.tick_at(note.bar, note.beat)
+            end = self.score.tick_at(note.bar, note.beat + note.dur)
+            # A note shorter than one tick would put its note-off on the same
+            # tick as its note-on, which some DAWs drop and others import as a
+            # click. Give it the one tick it needs to exist.
+            end = max(end, start + 1)
+            events.append(
+                _event(
+                    start,
+                    mido.Message(
+                        "note_on", note=note.pitch, velocity=note.velocity, channel=channel
+                    ),
+                    seq,
+                )
+            )
+            seq += 1
+            events.append(
+                _event(
+                    end,
+                    mido.Message("note_off", note=note.pitch, velocity=0, channel=channel),
+                    seq,
+                )
+            )
+            seq += 1
+        return _track_from_events(events)
 
 
 class DrumTrack(Track):
@@ -479,6 +656,26 @@ class Score:
         quarters = rem_beats * 4.0 / den
         return self._bar_start(target_bar) + quarters * 60.0 / self.bpm_at(target_bar)
 
+    def tick_at(self, bar: int, beat: float) -> int:
+        """Convert a bar and beat to MIDI ticks.
+
+        The tempo map is not consulted, and that is not an oversight: ticks *are*
+        musical time. A DAW draws its bar grid at fixed tick multiples and lays
+        the tempo map over the top, so bar 60 beat 1 is at
+        ``60 * quarters_per_bar * TICKS_PER_QUARTER`` whatever the tempo does in
+        between. Converting a note's seconds into ticks instead would bake the
+        tempo in a second time, and every note after the first tempo change would
+        land off the grid by however much the tempo had moved.
+
+        ``beat`` is 1-indexed and may exceed the bar length, exactly as in
+        :meth:`time_at`.
+        """
+        if bar < 0:
+            raise ValueError(f"bar must be >= 0, got {bar}")
+        _, den = self.time_sig
+        quarters = bar * self.quarters_per_bar + (beat - 1.0) * 4.0 / den
+        return int(round(quarters * TICKS_PER_QUARTER))
+
     @property
     def total_bars(self) -> int:
         """Song length in bars, from sections and from where notes actually are.
@@ -499,9 +696,105 @@ class Score:
     # -- export ------------------------------------------------------------
 
     def to_midi(self) -> pretty_midi.PrettyMIDI:
+        """The score as an in-memory pretty_midi object, for analysis.
+
+        Note times in seconds are exact. The tempo map is not, and cannot be:
+        pretty_midi takes a single ``initial_tempo`` and offers no public way to
+        put the rest of a map onto an object you built in memory. So this object
+        knows where every note sounds and does not know where the bar lines are
+        after the first tempo change.
+
+        That limitation is why :meth:`write` builds the file with mido rather
+        than writing this object out. Anything that needs the bar grid, which
+        means any DAW, should read the file.
+        """
         midi = pretty_midi.PrettyMIDI(initial_tempo=self._tempo_bpms[0])
         for t in self.tracks:
             midi.instruments.append(t._to_instrument())
+        return midi
+
+    def _conductor_track(self) -> mido.MidiTrack:
+        """Track 0: the time signature, the whole tempo map, section markers.
+
+        Emitting the full map is the half of the fix that is visible in a DAW's
+        tempo lane. The other half is that the notes are at musical ticks (see
+        :meth:`tick_at`); a correct tempo map laid over seconds-derived note
+        positions would be worse than no map at all, because then the grid moves
+        and the notes do not.
+
+        Markers are cheap and arrive as locators in both Ableton and Pro Tools,
+        so the section names the composer declared survive into the session
+        instead of living only in the sidecar.
+        """
+        num, den = self.time_sig
+        events = [
+            _event(
+                0,
+                mido.MetaMessage("time_signature", numerator=num, denominator=den),
+                0,
+            )
+        ]
+        seq = 1
+
+        # Repeats of the same tempo are dropped. ramp_tempo() writes one entry
+        # per bar, so a ramp that begins at the opening tempo would otherwise
+        # emit a redundant event, and some DAWs draw every event in the tempo
+        # lane whether or not it changes anything.
+        previous: float | None = None
+        for bar, bpm in zip(self._tempo_bars, self._tempo_bpms):
+            if previous is not None and abs(bpm - previous) < 1e-9:
+                continue
+            previous = bpm
+            events.append(
+                _event(
+                    self.tick_at(bar, 1),
+                    # Microseconds per quarter note is the only tempo unit MIDI
+                    # has, and it is an integer, so a BPM never survives exactly.
+                    # bpm2tempo's time_signature argument is left at its 4/4
+                    # default deliberately: a Score's bpm counts quarter notes
+                    # whatever the time signature, which is the same convention
+                    # _bar_start() uses.
+                    mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(bpm)),
+                    seq,
+                )
+            )
+            seq += 1
+
+        for section in self.sections:
+            events.append(
+                _event(
+                    self.tick_at(section.start_bar, 1),
+                    mido.MetaMessage("marker", text=_midi_text(section.name)),
+                    seq,
+                )
+            )
+            seq += 1
+
+        return _track_from_events(events)
+
+    def _midi_file(self) -> mido.MidiFile:
+        """The Standard MIDI File this score writes.
+
+        Type 1 with a conductor track and then one named track per part, which is
+        the same shape pretty_midi's writer produces, so everything downstream
+        that reads ``out.mid`` sees the file it already expected. Note-less tracks
+        are written too, again matching the old behaviour: a declared but unused
+        track is a fact about the arrangement, and ``structure()`` reports it.
+        """
+        midi = mido.MidiFile(type=1, ticks_per_beat=TICKS_PER_QUARTER)
+        midi.tracks.append(self._conductor_track())
+
+        melodic = 0
+        for t in self.tracks:
+            if t.is_drum:
+                channel = _DRUM_CHANNEL
+            else:
+                # Past 15 melodic parts the channels have to repeat, which is
+                # harmless here: each part is its own track in a type-1 file, so
+                # a DAW separates them by track regardless.
+                channel = _MELODIC_CHANNELS[melodic % len(_MELODIC_CHANNELS)]
+                melodic += 1
+            midi.tracks.append(t._to_mido_track(channel))
         return midi
 
     def structure(self) -> dict:
@@ -551,7 +844,7 @@ class Score:
         import json
         from pathlib import Path as _Path
 
-        self.to_midi().write(path)
+        self._midi_file().save(str(path))
         sidecar = _Path(path).with_suffix(".score.json")
         sidecar.write_text(json.dumps(self.structure(), indent=2))
         return path

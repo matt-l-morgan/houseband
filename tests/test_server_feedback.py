@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from houseband import config as cfg
 from houseband import server
 from houseband.events import EventLog, read_events
+from houseband.types import DIMENSION_TITLES
 
 FAKE_KEY = "sk-ant-api03-notarealkeybutshapedlikeone0000000000"
 
@@ -35,10 +36,8 @@ def runs_root(tmp_path, monkeypatch):
     root.mkdir(parents=True, exist_ok=True)
     config = cfg.Config(
         runs_dir=root,
-        references_dir=tmp_path / "references",
         playbooks_dir=tmp_path / "playbooks",
     )
-    config.references_dir.mkdir(parents=True, exist_ok=True)
     config.playbooks_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(cfg, "load", lambda: config)
     return root
@@ -308,19 +307,35 @@ class TestCandidates:
         assert [track["name"] for track in card["tracks"]] == ["drums", "bass", "pad"]
         assert card["tracks"][0]["is_drum"] is True
 
-    def test_previews_are_listed_and_distinguished(self, client, runs_root):
+    def test_a_judged_take_absorbs_its_own_preview(self, client, runs_root):
+        """One card per take, not two.
+
+        This test previously asserted the opposite, that the preview and the
+        judged render were listed side by side as distinct cards. They are the
+        same music: the loop renders a clip as soon as a composer finishes so
+        there is something to audition, then renders it again under a blinded id
+        for the panel. Listing both gave a producer six cards for three takes
+        with nothing marking which pair was the duplicate, which is precisely
+        the confusion a variation browser exists to remove.
+        """
         _write_run(runs_root)
         payload = client.get("/api/runs/demo/candidates").json()
-        previews = [card for card in payload["candidates"] if card["preview"]]
-        judged = [card for card in payload["candidates"] if not card["preview"]]
-        assert [card["candidate_id"] for card in previews] == ["preview-carbide-r1"]
-        assert {card["candidate_id"] for card in judged} == {"r1c1", "r1c2"}
+        ids = {card["candidate_id"] for card in payload["candidates"]}
+        assert ids == {"r1c1", "r1c2"}
+        assert not [card for card in payload["candidates"] if card["preview"]]
+
+        carbide = _card(client, "demo", "r1c1")
+        assert carbide["superseded_ids"] == ["preview-carbide-r1"]
+        # lumen never previewed, so it absorbed nothing.
+        assert _card(client, "demo", "r1c2")["superseded_ids"] == []
 
     def test_order_is_as_generated_not_ranked(self, client, runs_root):
         _write_run(runs_root)
         payload = client.get("/api/runs/demo/candidates").json()
         order = [card["candidate_id"] for card in payload["candidates"]]
-        assert order == ["preview-carbide-r1", "r1c1", "r1c2"]
+        # carbide leads because its preview was the first artifact of the run, and
+        # a take keeps the position it was first drawn at when its scores land.
+        assert order == ["r1c1", "r1c2"]
         # r1c2 scores higher, so a ranked payload would have inverted the pair.
         assert _card(client, "demo", "r1c2")["weighted_total"] > _card(client, "demo", "r1c1")["weighted_total"]
 
@@ -383,7 +398,11 @@ class TestCandidates:
         assert client.get("/api/runs/nosuchrun/candidates").status_code == 404
 
     def test_track_names_fall_back_to_the_judges_findings(self, client, runs_root):
-        """A reference piece has no sidecar, but the judges still name its tracks."""
+        """A take with no sidecar still gets a track list from the findings.
+
+        The per-stem keep/discard controls need names, and with no sidecar on disk
+        the judges' findings are the only place a track is named.
+        """
         run_dir = runs_root / "nosidecar"
         run_dir.mkdir(parents=True)
         log = EventLog(run_dir / "events.jsonl")
@@ -393,7 +412,6 @@ class TestCandidates:
             round=1,
             dimension="melody",
             candidate_id="cref",
-            is_reference=True,
             score=7,
             findings=[
                 {"claim": "lead is static", "track": "lead"},
@@ -402,7 +420,6 @@ class TestCandidates:
             ],
         )
         card = _card(client, "nosidecar", "cref")
-        assert card["is_reference"] is True
         assert [track["name"] for track in card["tracks"]] == ["lead", "pad"]
         assert card["tracks_from"] == "judge findings"
 
@@ -442,10 +459,20 @@ class TestSyntheticFixture:
         scored = [card for card in candidates if card["scores"]]
         assert scored, "no candidate in the fixture has scores"
         for card in scored:
-            assert len(card["scores"]) == 8
+            # Counted against the contract rather than a literal, because the
+            # rubric gains and loses dimensions and this endpoint reports whatever
+            # the log holds.
+            assert len(card["scores"]) >= 6
+            titled = [score for score in card["scores"] if score["dimension"] in DIMENSION_TITLES]
+            assert len(titled) == len(card["scores"]), "an unrecognised dimension leaked through"
             assert card["mean_score"] is not None
             assert card["weighted_total"] is not None
-            assert card["tracks"], "a scored candidate should have a track list"
+
+        # Per-stem feedback is the high-value part of this feature, so at least
+        # some takes have to arrive with a track list. Not all of them: the
+        # reference has no sidecar, and a judge that anchored nothing to a track
+        # leaves nothing to derive one from.
+        assert any(card["tracks"] for card in scored)
 
         # Ids repeat across the fixture's two rounds; each round is its own take.
         pairs = [(card["candidate_id"], card["round"]) for card in candidates]
@@ -482,6 +509,26 @@ class TestExport:
         (run_dir / "exports" / "r1c1.zip").write_bytes(b"PK\x03\x04")
         card = _card(client, "demo", "r1c1")
         assert card["export"] == {"available": True, "file": "exports/r1c1.zip"}
+
+    def test_a_refusal_to_build_one_says_why(self, client, runs_root):
+        """The 404 carries the exporter's own complaint when it has one.
+
+        ``out.mid`` in the fixture is not a MIDI file, so on-demand generation
+        cannot succeed. "The exporter raised X" is a far more useful answer than
+        "not found", and it is the difference between a producer filing a bug and
+        a producer fixing their run.
+        """
+        pytest.importorskip("houseband.export")
+        _write_run(runs_root)
+        detail = client.get("/api/runs/demo/export/r1c1").json()["detail"]
+        assert "r1c1" in detail
+        assert len(detail) > len("No DAW export bundle for r1c1 in this run.")
+
+    def test_generation_is_not_attempted_for_an_unknown_candidate(self, client, runs_root):
+        _write_run(runs_root)
+        response = client.get("/api/runs/demo/export/r9c9")
+        assert response.status_code == 404
+        assert not (runs_root / "demo" / "exports").exists()
 
     @pytest.mark.parametrize(
         "candidate_id",

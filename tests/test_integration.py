@@ -234,41 +234,16 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stub-not-a-real-key")
     config = cfg.Config(
         runs_dir=tmp_path / "runs",
-        references_dir=tmp_path / "references",
         playbooks_dir=tmp_path / "playbooks",
     )
-    config.references_dir.mkdir(parents=True, exist_ok=True)
     config.playbooks_dir.mkdir(parents=True, exist_ok=True)
     return config
-
-
-def _make_reference(config, tmp_path):
-    """A reference piece with different material from the candidates.
-
-    Different on purpose: identical material would trip the originality gate and
-    the test would be exercising rejection rather than the happy path.
-    """
-    from houseband.house import Score
-
-    s = Score(bpm=132, key="E")
-    s.mark_section("a", 0, 16)
-    s.mark_section("b", 16, 16)
-    lead = s.track("lead", patch="saw_lead")
-    pad = s.track("pad", patch="warm_pad", pan=0.3)
-    for bar in range(32):
-        for i, beat in enumerate((1, 2.5, 4)):
-            lead.note(bar, beat, 64 + ((bar * 5 + i * 7) % 19), 0.75, 70 + (i * 9))
-        pad.chord(bar, 1, symbol="E" if bar % 2 else "C#m", dur=3.8, vel=48)
-    path = config.references_dir / "ref.mid"
-    s.write(str(path))
-    return path
 
 
 class TestFullLoop:
     def test_two_rounds_end_to_end(self, isolated, tmp_path):
         from houseband import loop
 
-        _make_reference(isolated, tmp_path)
         client = StubClient()
 
         run_dir = loop.run(
@@ -292,7 +267,8 @@ class TestFullLoop:
         # Every stage fired.
         for expected in (
             "run.started",
-            "analyst.finished",
+            "brief.finished",
+            "criteria.derived",
             "round.started",
             "composer.started",
             "composer.tool_call",
@@ -313,11 +289,10 @@ class TestFullLoop:
         assert len([e for e in events if e.kind == "composer.finished"]) == 4
 
     def test_judges_are_blind_to_team_identity(self, isolated, tmp_path):
-        """The reference has to be indistinguishable in the pool, or the
-        calibration check measures nothing."""
+        """A persona name in the pool would let a judge reward the persona it
+        finds most convincing rather than the music."""
         from houseband import loop
 
-        _make_reference(isolated, tmp_path)
         client = StubClient()
         run_dir = loop.run(
             prompt="test",
@@ -332,16 +307,19 @@ class TestFullLoop:
         verdicts = json.loads((run_dir / "round1" / "verdicts.json").read_text())
         # Candidates are opaque ids, and the mapping back to teams is recorded
         # separately rather than being visible to the judge.
-        assert set(verdicts["id_to_team"]) >= {"r1c1", "r1c2"}
-        assert "r1ref" in verdicts["id_to_team"]
-        assert verdicts["id_to_team"]["r1ref"] == "reference"
+        assert set(verdicts["id_to_team"]) == {"r1c1", "r1c2"}
+        assert set(verdicts["id_to_team"].values()) == {"conservatory", "crate"}
+        # And no persona name leaks into the ids the judge is shown.
+        assert not any(
+            team in candidate_id
+            for candidate_id, team in verdicts["id_to_team"].items()
+        )
 
     def test_held_out_dimension_is_hidden_from_the_coach(self, isolated, tmp_path):
         """Agents optimise against whatever the coach is told, so one dimension
         stays out of the coaching path entirely."""
         from houseband import loop
 
-        _make_reference(isolated, tmp_path)
         client = StubClient()
         run_dir = loop.run(
             prompt="test",
@@ -365,7 +343,6 @@ class TestFullLoop:
         """Teams compete, so a lesson learned by one must not leak to the other."""
         from houseband import loop
 
-        _make_reference(isolated, tmp_path)
         client = StubClient()
         loop.run(
             prompt="test",
@@ -400,7 +377,6 @@ class TestFullLoop:
     def test_no_key_material_reaches_the_log(self, isolated, tmp_path):
         from houseband import loop
 
-        _make_reference(isolated, tmp_path)
         run_dir = loop.run(
             prompt="test",
             teams=1,
@@ -416,74 +392,22 @@ class TestFullLoop:
         assert "sk-ant" not in text
 
 
-class TestCalibrationReporting:
-    """Guards the branch that only runs when the judges look wrong.
+class TestJudgeScoresThatDisagree:
+    """A round where the panel spreads its scores widely must still complete.
 
-    A real bug lived here: loop.py wrote ``+ calibration.summary`` without the
-    call, so a miscalibrated round raised TypeError and killed the run right
-    after judging. Every existing test missed it because the stub scored every
-    candidate identically, which makes the reference *tie* rather than lose, and
-    a tie is not a breach. The happy path was covered and the alarm path was not.
+    This class is what remains of a suite that covered the reference-calibration
+    alarm, and it is kept because of the bug that suite caught: loop.py wrote
+    ``+ calibration.summary`` without calling it, so a round that tripped the
+    alarm raised TypeError and killed the run immediately after judging. Every
+    other test missed it because the stub scored every candidate identically and
+    the alarm branch never executed. The alarm is gone with the reference, but
+    "an unusual set of scores does not take the run down" is the property that
+    actually mattered, and a stub that returns the same number for everything
+    will never test it.
     """
 
-    def _verdict(self, candidate_id, team, score, is_reference=False):
-        from houseband.types import DIMENSIONS, ScoredDimension
-
-        return CandidateVerdict(
-            candidate_id=candidate_id,
-            team=team,
-            is_reference=is_reference,
-            dimensions=[
-                ScoredDimension(dimension=d, score=score, rationale="stub")
-                for d in DIMENSIONS
-            ],
-        )
-
-    def test_agent_beating_the_reference_is_reported(self):
-        from houseband.judges import check_calibration
-
-        report = check_calibration(
-            {
-                "c1": self._verdict("c1", "crate", 9),
-                "ref": self._verdict("ref", "reference", 3, is_reference=True),
-            }
-        )
-        assert report.ok is False
-        assert report.breaches
-
-    def test_report_survives_what_the_loop_does_to_it(self):
-        """The exact two operations loop.py performs on the report."""
-        from houseband.judges import check_calibration
-
-        report = check_calibration(
-            {
-                "c1": self._verdict("c1", "crate", 9),
-                "ref": self._verdict("ref", "reference", 3, is_reference=True),
-            }
-        )
-        # Concatenation: this is what raised TypeError in production.
-        message = "JUDGE CALIBRATION SUSPECT: " + report.summary()
-        assert isinstance(message, str)
-        assert len(message) > len("JUDGE CALIBRATION SUSPECT: ")
-        # And it must be JSON-serialisable for the event payload.
-        assert isinstance(report.model_dump(), dict)
-
-    def test_missing_reference_does_not_read_as_a_pass(self):
-        """A check that could not run must not look like a check that passed."""
-        from houseband.judges import check_calibration
-
-        report = check_calibration({"c1": self._verdict("c1", "crate", 7)})
-        assert report.has_reference is False
-        assert report.ok is False
-        assert isinstance(report.summary(), str)
-
-    def test_miscalibrated_round_does_not_kill_the_run(self, isolated, tmp_path):
-        """End to end, with the reference scored below the agents.
-
-        The stub returns a declining score per distinct candidate, and the loop
-        judges the reference last, so the reference comes out lowest and the
-        alarm path actually executes inside a real run.
-        """
+    def test_widely_spread_scores_do_not_kill_the_run(self, isolated, tmp_path):
+        """End to end, with each candidate scored lower than the last."""
         from houseband import loop
 
         class DecliningStub(StubClient):
@@ -513,7 +437,6 @@ class TestCalibrationReporting:
                     )
                 return super().parse(**kwargs)
 
-        _make_reference(isolated, tmp_path)
         run_dir = loop.run(
             prompt="test",
             teams=2,

@@ -1,9 +1,5 @@
 """The rubric panel: one independent LLM judge per dimension.
 
-Eight dimensions for a long-form piece, nine for a starter, which is not the same
-nine minus one: see :data:`houseband.types.DIMENSIONS_FOR_MODE` for why a loop is
-judged on its seam instead of its form.
-
 Four decisions carry this module.
 
 **Anchored rubrics, loaded from disk.** Each dimension's criteria live in
@@ -46,12 +42,10 @@ from houseband.score_text import render
 from houseband.types import (
     DIMENSION_TITLES,
     DIMENSIONS,
-    DIMENSIONS_FOR_MODE,
     Brief,
     Candidate,
     CandidateVerdict,
     DimensionVerdict,
-    Mode,
     ScoredDimension,
 )
 
@@ -86,19 +80,13 @@ def load_rubric(dimension: str) -> str:
 
 
 def missing_rubrics(dimensions: tuple[str, ...] = DIMENSIONS) -> list[str]:
-    """Dimensions with no rubric file. Used to fail fast at startup."""
-    return [d for d in dimensions if not (RUBRIC_DIR / f"{d}.md").exists()]
+    """Dimensions with no rubric file. Used to fail fast at startup.
 
-
-def missing_rubrics_for_mode(mode: Mode = "longform") -> list[str]:
-    """The same check against the dimension set a given mode actually judges.
-
-    Worth having separately because the two modes do not share their dimension
-    sets: a rubric directory that is complete for long-form can be missing both
-    starter rubrics, and the failure would otherwise surface as a dead dimension
-    partway into a paid run rather than at startup.
+    Takes the dimension set rather than reading the global, so a caller judging a
+    subset can check exactly what it is about to ask for. A missing rubric would
+    otherwise surface as a dead dimension partway into a paid run.
     """
-    return missing_rubrics(DIMENSIONS_FOR_MODE[mode])
+    return [d for d in dimensions if not (RUBRIC_DIR / f"{d}.md").exists()]
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +472,6 @@ def judge_candidate(
     config: Any | None = None,
     log: EventLog | None = None,
     round: int = 0,
-    mode: Mode = "longform",
 ) -> CandidateVerdict:
     """Run the whole panel on one candidate.
 
@@ -492,16 +479,12 @@ def judge_candidate(
     eight serial calls, three of them sampled three times, is fourteen
     round-trips of pure waiting.
 
-    ``mode`` selects the dimension set: a starter is not judged on form (a loop
-    has none) and is judged on loop usability and headroom instead. An explicit
-    ``dimensions`` still wins, for the experiments that want one dimension in
-    isolation. The mode is recorded on the verdict so that ``weighted_total``
-    applies the right weights later, including after a round-trip through the
-    run log.
+    ``dimensions`` defaults to the full set and is overridable, for the
+    experiments that want one dimension in isolation.
     """
     client = resolve_client(client)
     config = config or cfg.load()
-    dimensions = dimensions or DIMENSIONS_FOR_MODE[mode]
+    dimensions = dimensions or DIMENSIONS
 
     def one(dimension: str) -> ScoredDimension:
         return judge_dimension(
@@ -524,8 +507,6 @@ def judge_candidate(
     return CandidateVerdict(
         candidate_id=candidate.candidate_id,
         team=candidate.team,
-        is_reference=candidate.is_reference,
-        mode=mode,
         dimensions=scored,
     )
 
@@ -544,7 +525,6 @@ def run_panel(
     config: Any | None = None,
     log: EventLog | None = None,
     round: int = 0,
-    mode: Mode = "longform",
 ) -> dict[str, CandidateVerdict]:
     """Judge every candidate, returning verdicts keyed by ``candidate_id``.
 
@@ -554,15 +534,14 @@ def run_panel(
     the write premium eight times over. Serially, the first candidate warms all
     eight prefixes and everyone after it reads them.
 
-    ``mode`` picks the dimension set and is recorded on every verdict. Passing it
-    once here rather than per candidate is deliberate: a round in which two
-    candidates were judged against different dimension sets would produce
-    weighted totals that are not comparable, which is the one thing the panel
-    exists to produce.
+    ``dimensions`` is passed once here rather than per candidate deliberately: a
+    round in which two candidates were judged against different dimension sets
+    would produce weighted totals that are not comparable, which is the one thing
+    the panel exists to produce.
     """
     client = resolve_client(client)
     config = config or cfg.load()
-    dimensions = dimensions or DIMENSIONS_FOR_MODE[mode]
+    dimensions = dimensions or DIMENSIONS
 
     verdicts: dict[str, CandidateVerdict] = {}
     for candidate in candidates:
@@ -575,6 +554,5 @@ def run_panel(
             config=config,
             log=log,
             round=round,
-            mode=mode,
         )
     return verdicts

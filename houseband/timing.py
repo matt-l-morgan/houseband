@@ -33,7 +33,7 @@ class TempoMap:
 
     @classmethod
     def from_midi(cls, midi) -> "TempoMap":
-        """Best effort when no structural sidecar exists (a reference MIDI).
+        """Best effort when no structural sidecar exists (a foreign MIDI).
 
         Uses the file's own tempo changes, mapped onto bars via a constant
         4/4 assumption. Approximate by nature, which is why the sidecar path is

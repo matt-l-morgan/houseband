@@ -26,12 +26,10 @@ runs/
 # one file a user might be tempted to put a credential in. Never committed.
 config.toml
 
-# Reference MIDI. Community transcriptions of copyrighted songs are derivative
-# works and cannot be redistributed, so only the directory's own README and
-# .gitkeep are tracked. See docs/references.md.
-references/*
-!references/README.md
-!references/.gitkeep
+# Reference MIDI. The feature that used one is gone, but the directory is still
+# ignored outright: anyone who kept a community transcription of a copyrighted
+# song here must not have it swept into a commit.
+references/
 
 # Playbooks are per-run learning state, not source.
 playbooks/

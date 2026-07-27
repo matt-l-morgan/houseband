@@ -274,7 +274,7 @@ class TestPartFiles:
             assert mido.MidiFile(str(path)).type == 0
 
     def test_part_files_carry_the_whole_tempo_map_not_just_the_first_entry(self, tmp_path):
-        """Score.write() drops tempo changes. The export must not."""
+        """Every file in the bundle carries the map, not only the combined one."""
         s = Score(bpm=80, key="Em")
         s.mark_section("a", 0, 8)
         s.tempo(4, 120.0)
@@ -286,9 +286,11 @@ class TestPartFiles:
         midi = tmp_path / "ramp.mid"
         s.write(str(midi))
 
-        # The file Score wrote knows only the opening tempo, which is the gap.
+        # Score.write() emits the whole map itself now, so the job here is to
+        # carry through what it was given rather than to be the only writer that
+        # gets this right.
         _, source_tempi = pretty_midi.PrettyMIDI(str(midi)).get_tempo_changes()
-        assert len(source_tempi) == 1
+        assert len(source_tempi) == 2
 
         result = export_bundle(midi, out_dir=tmp_path / "export")
         assert result.ok, result.feedback()

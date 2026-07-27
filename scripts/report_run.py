@@ -32,7 +32,11 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from houseband import config as cfg  # noqa: E402
 from houseband.events import read_events  # noqa: E402
-from houseband.types import DIMENSION_TITLES, DIMENSIONS  # noqa: E402
+from houseband.types import (  # noqa: E402
+    DIMENSION_TITLES,
+    DIMENSIONS,
+    CandidateVerdict,
+)
 
 
 def _latest_run(runs_dir: Path) -> Path | None:
@@ -96,7 +100,6 @@ def main(argv: list[str] | None = None) -> int:
             team
             for data in by_round.values()
             for team in data["id_to_team"].values()
-            if team != "reference"
         }
     )
 
@@ -108,9 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     print(header)
     print("-" * len(header))
 
-    for team in teams + (["reference"] if any(
-        "reference" in d["id_to_team"].values() for d in by_round.values()
-    ) else []):
+    for team in teams:
         row = team.ljust(16)
         values: list[float] = []
         for round_no in rounds:
@@ -122,19 +123,12 @@ def main(argv: list[str] | None = None) -> int:
             if verdict is None:
                 row += f"{'-':>12}"
                 continue
-            weights_sum = total = 0.0
-            from houseband.types import DIMENSION_WEIGHTS, WEIGHTS_FOR_MODE
-
-            # Weighted by the mode the verdict was judged under, matching
-            # CandidateVerdict.weighted_total. A starter reweighted with
-            # long-form weights would report a number nobody ever computed, and
-            # runs logged before modes existed carry no mode at all.
-            weights = WEIGHTS_FOR_MODE.get(verdict.get("mode"), DIMENSION_WEIGHTS)
-            for dimension in verdict["dimensions"]:
-                weight = weights.get(dimension["dimension"], 1.0)
-                total += dimension["score"] * weight
-                weights_sum += weight
-            score = total / weights_sum if weights_sum else 0.0
+            # Rehydrated rather than re-averaged here. This used to walk the
+            # weight table itself, which meant two implementations of the run's
+            # headline number that could disagree after any weighting change --
+            # and a report that quietly contradicts the pipeline is worse than
+            # no report.
+            score = CandidateVerdict.model_validate(verdict).weighted_total
             values.append(score)
             row += f"{score:>12.2f}"
         if len(values) >= 2:
@@ -148,7 +142,10 @@ def main(argv: list[str] | None = None) -> int:
     elo_events = [e for e in events if e.kind == "elo.updated" and e.data.get("ratings")]
     if elo_events:
         print("\n" + "=" * 76)
-        print("ELO BY ROUND  (reference pinned, so team ratings stay comparable)")
+        # Elo is zero-sum with nothing pinned, so it ranks within a round and
+        # says little across them. The weighted score above is the absolute
+        # measure, because those rubrics are anchored to written descriptors.
+        print("ELO BY ROUND  (within-round ranking; read progress from the score above)")
         print("=" * 76)
         all_names = sorted({n for e in elo_events for n in e.data["ratings"]})
         header = "team".ljust(16) + "".join(

@@ -67,7 +67,7 @@ def build(
         brief.prompt = prompt
         if log:
             log.emit(
-                "run.started",
+                "brief.finished",
                 f"Brief: {brief.genre or 'unspecified genre'}, "
                 f"{brief.target_length or 'unspecified length'}",
                 usage=Usage.from_response(response),

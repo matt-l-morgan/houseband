@@ -8,14 +8,23 @@ its playable range and genuinely cannot compute n-gram overlap against a
 reference. Those two checks need arithmetic, so they live here and score
 nothing.
 
-Three responsibilities:
+Two responsibilities:
 
 * :func:`check_imports` -- static allowlist over model-written code, run before
   execution. A mitigation, not a sandbox (see ``docs/security.md``).
 * :func:`validate_score` -- structural sanity on the produced MIDI.
-* :func:`check_originality` -- melodic n-gram overlap against a reference, which
-  is what stops "reward similarity to the reference" from quietly becoming
-  "reward plagiarism".
+
+There used to be a third: a melodic n-gram overlap check against the reference
+recording, which existed so that "use a reference to calibrate the judges" could
+not quietly become "reward plagiarism". References were removed from the tool, so
+that check had nothing left to compare against and went with them. Originality is
+still judged, by the rubric of the same name, which is a qualitative read rather
+than a similarity measure.
+
+Everything here is deterministic on purpose. These are the checks an LLM cannot
+be trusted to make: whether a pitch is inside an instrument's playable range is
+a fact, and a judge that has to also verify facts spends its attention there
+instead of on the music.
 """
 
 from __future__ import annotations
@@ -315,104 +324,6 @@ def validate_score(
 
 
 # ---------------------------------------------------------------------------
-# Originality
-# ---------------------------------------------------------------------------
-
-
-def _interval_ngrams(midi_path: Path, n: int = 8) -> set[tuple[int, ...]]:
-    """Melodic interval n-grams across every non-drum track.
-
-    Intervals rather than absolute pitches, so transposing a lifted melody does
-    not disguise it.
-    """
-    midi = pretty_midi.PrettyMIDI(str(midi_path))
-    grams: set[tuple[int, ...]] = set()
-    for inst in midi.instruments:
-        if inst.is_drum:
-            continue
-        notes = sorted(inst.notes, key=lambda x: (x.start, x.pitch))
-        # Monophonic reduction: highest pitch at each distinct onset.
-        top: list[int] = []
-        for note in notes:
-            if top and abs(note.start - notes[notes.index(note) - 1].start) < 1e-6:
-                top[-1] = max(top[-1], note.pitch)
-            else:
-                top.append(note.pitch)
-        intervals = [b - a for a, b in zip(top, top[1:])]
-        for i in range(len(intervals) - n + 1):
-            grams.add(tuple(intervals[i : i + n]))
-    return grams
-
-
-@dataclass
-class OriginalityReport:
-    ok: bool
-    overlap_fraction: float
-    shared_ngrams: int
-    candidate_ngrams: int
-    detail: str = ""
-
-
-def check_originality(
-    candidate_midi: Path,
-    reference_midis: list[Path],
-    n: int = 8,
-    threshold: float = 0.12,
-) -> OriginalityReport:
-    """Reject a candidate that reproduces long melodic spans from a reference.
-
-    The reference is used to calibrate judges and to derive structural criteria,
-    never to reward similarity, so this gate is what makes that distinction
-    enforceable rather than aspirational.
-    """
-    candidate = _interval_ngrams(candidate_midi, n=n)
-    if not candidate:
-        return OriginalityReport(
-            ok=True,
-            overlap_fraction=0.0,
-            shared_ngrams=0,
-            candidate_ngrams=0,
-            detail="No melodic material to compare.",
-        )
-
-    reference: set[tuple[int, ...]] = set()
-    for path in reference_midis:
-        try:
-            reference |= _interval_ngrams(path, n=n)
-        except Exception:
-            continue
-
-    if not reference:
-        return OriginalityReport(
-            ok=True,
-            overlap_fraction=0.0,
-            shared_ngrams=0,
-            candidate_ngrams=len(candidate),
-            detail="No reference material available to compare against.",
-        )
-
-    shared = candidate & reference
-    fraction = len(shared) / len(candidate)
-    ok = fraction <= threshold
-    detail = (
-        f"{len(shared)}/{len(candidate)} melodic {n}-gram windows "
-        f"({fraction:.1%}) also appear in the reference; threshold {threshold:.0%}."
-    )
-    if not ok:
-        detail += (
-            " Rejected: this reproduces the reference's melodic material rather "
-            "than meeting its structural criteria with original material."
-        )
-    return OriginalityReport(
-        ok=ok,
-        overlap_fraction=fraction,
-        shared_ngrams=len(shared),
-        candidate_ngrams=len(candidate),
-        detail=detail,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Combined gate
 # ---------------------------------------------------------------------------
 
@@ -421,24 +332,12 @@ def check_originality(
 class GateResult:
     ok: bool
     validation: ValidationReport
-    originality: OriginalityReport | None = None
 
     def feedback(self) -> str:
-        parts = [self.validation.feedback()]
-        if self.originality and not self.originality.ok:
-            parts.append(f"ORIGINALITY REJECTED: {self.originality.detail}")
-        return "\n\n".join(parts)
+        return self.validation.feedback()
 
 
-def gate(
-    midi_path: Path,
-    sidecar_path: Path | None = None,
-    reference_midis: list[Path] | None = None,
-) -> GateResult:
+def gate(midi_path: Path, sidecar_path: Path | None = None) -> GateResult:
     """Run every deterministic check a candidate must pass to reach the judges."""
     validation = validate_score(midi_path, sidecar_path)
-    originality = None
-    if validation.ok and reference_midis:
-        originality = check_originality(midi_path, reference_midis)
-    ok = validation.ok and (originality is None or originality.ok)
-    return GateResult(ok=ok, validation=validation, originality=originality)
+    return GateResult(ok=validation.ok, validation=validation)

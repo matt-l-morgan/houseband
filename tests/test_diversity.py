@@ -20,7 +20,7 @@ import pytest
 
 from houseband.house import Score
 from houseband.judges import diversity
-from houseband.types import Candidate, CandidateVerdict, ScoredDimension
+from houseband.types import DIMENSIONS, Candidate, CandidateVerdict, ScoredDimension
 
 # ---------------------------------------------------------------------------
 # Fixtures: two clips that could not be confused for each other
@@ -76,20 +76,17 @@ def breakbeat(tmp_path) -> Candidate:
 
 
 def _verdict(candidate_id: str, total: int) -> CandidateVerdict:
-    """A starter verdict whose weighted total is exactly ``total``.
+    """A verdict whose weighted total is exactly ``total``.
 
     Every dimension at the same score, so the weights cannot move the mean and
     the fixture says what it means.
     """
-    from houseband.types import STARTER_DIMENSIONS
-
     return CandidateVerdict(
         candidate_id=candidate_id,
         team="crate",
-        mode="starter",
         dimensions=[
             ScoredDimension(dimension=d, score=total, rationale="scripted")
-            for d in STARTER_DIMENSIONS
+            for d in DIMENSIONS
         ],
     )
 
@@ -369,12 +366,12 @@ def test_select_varied_degenerate_inputs(ambient):
     assert diversity.select_varied([ambient], verdicts, k=3, min_quality=9.5) == []
 
 
-def test_select_varied_uses_the_verdicts_own_mode_for_quality(ambient):
-    """Quality is read through weighted_total, so a starter is scored as one.
+def test_select_varied_reads_quality_through_the_weighted_total(ambient):
+    """The floor is applied to the weighted total, not to a raw mean.
 
-    A verdict carrying starter weights and one carrying long-form weights over
-    the same dimensions do not produce the same total, and the floor has to be
-    applied to whichever the candidate was actually judged as.
+    A clip whose groove and loop are strong and whose melody is thin clears the
+    bar, because those are the weights the panel actually uses. Reading an
+    unweighted mean here would let the melody score veto a usable clip.
     """
     lopsided = {
         "prompt_adherence": 5,
@@ -390,14 +387,14 @@ def test_select_varied_uses_the_verdicts_own_mode_for_quality(ambient):
     verdict = CandidateVerdict(
         candidate_id="amb",
         team="crate",
-        mode="starter",
         dimensions=[
             ScoredDimension(dimension=d, score=s, rationale="scripted")
             for d, s in lopsided.items()
         ],
     )
+    plain = sum(lopsided.values()) / len(lopsided)
 
-    assert verdict.weighted_total > 5.0
+    assert verdict.weighted_total > plain
     assert diversity.select_varied([ambient], {"amb": verdict}, k=1) == ["amb"]
     assert diversity.select_varied(
         [ambient], {"amb": verdict}, k=1, min_quality=verdict.weighted_total + 0.1

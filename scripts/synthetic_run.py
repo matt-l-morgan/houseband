@@ -37,7 +37,6 @@ TEAMS = ["carbide", "lumen"]
 
 TOOL_SCRIPT = [
     ("read_playbook", {"role": "songwriter"}, "12 rules loaded, 3 new since round 1."),
-    ("inspect_reference", {"name": "reference.mid", "bars": "0-8"}, "4/4, 122 BPM, 5 tracks, 64 bars."),
     ("run_program", {"path": "program.py", "timeout_s": 30.0}, "out.mid written, 5 tracks, 96 bars."),
     ("score_text", {"midi": "out.mid"}, "Rendered 96 bars of score text (14.2 KB)."),
 ]
@@ -73,27 +72,25 @@ def build(run_dir: Path, log: EventLog, rounds: int, delay: float, rng: random.R
 
     log.emit(
         "run.started",
-        "Run started with 2 composer teams over "
-        f"{rounds} rounds against reference.mid.",
+        f"Run started with 2 composer teams over {rounds} rounds.",
         prompt=prompt,
         teams=TEAMS,
         rounds=rounds,
         model=cfg.load().model,
-        reference="reference.mid",
     )
     beat()
 
-    elo = {"carbide": 1200.0, "lumen": 1200.0, "reference": 1350.0}
+    elo = {"carbide": 1200.0, "lumen": 1200.0}
 
     for round_index in range(1, rounds + 1):
         log.emit("round.started", f"Round {round_index} of {rounds}.", round=round_index)
         beat()
 
-        log.emit("analyst.started", "Structuring the brief.", round=round_index)
+        log.emit("brief.started", "Structuring the brief.", round=round_index)
         beat(0.5)
         log.emit(
-            "analyst.finished",
-            "Brief: dub techno, hypnotic, 122 BPM, 90 seconds.",
+            "brief.finished",
+            "Brief: dub techno, hypnotic, 122 BPM, a 16-bar loop.",
             round=round_index,
             usage=Usage(input_tokens=1_820, output_tokens=430, cache_read_input_tokens=1_024),
             genre="dub techno",
@@ -105,7 +102,7 @@ def build(run_dir: Path, log: EventLog, rounds: int, delay: float, rng: random.R
         candidates: list[tuple[str, str, bool]] = []
         for index, team in enumerate(TEAMS, start=1):
             candidate_id = f"c{index}"
-            candidates.append((candidate_id, team, False))
+            candidates.append((candidate_id, team))
             work_dir = run_dir / f"r{round_index}" / team
             work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -203,10 +200,9 @@ def build(run_dir: Path, log: EventLog, rounds: int, delay: float, rng: random.R
 
             log.emit(
                 "gate.passed",
-                "5 tracks, 96 bars, no range violations, 4-gram overlap 0.06.",
+                "5 tracks, 16 bars, no range violations.",
                 round=round_index,
                 team=team,
-                originality_overlap=0.06,
             )
             beat(0.3)
 
@@ -223,37 +219,22 @@ def build(run_dir: Path, log: EventLog, rounds: int, delay: float, rng: random.R
             )
             beat()
 
-        reference_dir = run_dir / f"r{round_index}" / "reference"
-        reference_dir.mkdir(parents=True, exist_ok=True)
-        (reference_dir / "candidate.png").write_bytes(_PNG)
-        (reference_dir / "candidate.oga").write_bytes(b"OggS" + b"\x00" * 60)
-        candidates.append(("c0", "reference", True))
-        log.emit(
-            "artifact.rendered",
-            "Reference rendered for calibration.",
-            round=round_index,
-            team="reference",
-            candidate_id="c0",
-            is_reference=True,
-            piano_roll=f"r{round_index}/reference/candidate.png",
-            audio=f"r{round_index}/reference/candidate.oga",
-        )
-        beat()
-
         log.emit(
             "judge.started",
             f"Judging {len(candidates)} candidates blind on {len(DIMENSIONS)} dimensions.",
             round=round_index,
-            candidates=[cid for cid, _, _ in candidates],
+            candidates=[cid for cid, _ in candidates],
         )
         beat(0.5)
 
         verdicts: dict[str, dict[str, int]] = {}
-        for candidate_id, team, is_reference in candidates:
+        for candidate_id, team in candidates:
             verdicts[candidate_id] = {}
             for dimension in DIMENSIONS:
-                base = 7 if is_reference else rng.randint(4, 8)
-                base = min(10, max(1, base + (1 if round_index > 1 and not is_reference else 0)))
+                base = rng.randint(4, 8)
+                # Nudged up after round one, so the fixture shows the improvement
+                # the learning loop is supposed to produce.
+                base = min(10, max(1, base + (1 if round_index > 1 else 0)))
                 sampled = [
                     min(10, max(1, base + rng.choice([-1, 0, 0, 1])))
                     for _ in range(3 if dimension in cfg.MEDIAN_SAMPLED_DIMENSIONS else 1)
@@ -284,7 +265,6 @@ def build(run_dir: Path, log: EventLog, rounds: int, delay: float, rng: random.R
                     team=team,
                     dimension=dimension,
                     candidate_id=candidate_id,
-                    is_reference=is_reference,
                     score=score,
                     samples=sampled,
                     spread=max(sampled) - min(sampled),
@@ -323,8 +303,6 @@ def build(run_dir: Path, log: EventLog, rounds: int, delay: float, rng: random.R
             beat(0.2)
 
         for name in elo:
-            if name == "reference":
-                continue
             elo[name] += rng.uniform(-24, 34)
         log.emit(
             "elo.updated",
@@ -334,8 +312,7 @@ def build(run_dir: Path, log: EventLog, rounds: int, delay: float, rng: random.R
                 {
                     "team": name,
                     "elo": round(rating, 1),
-                    "delta": round(rating - 1200.0, 1) if name != "reference" else 0.0,
-                    "is_reference": name == "reference",
+                    "delta": round(rating - 1200.0, 1),
                     "games": round_index * 2,
                 }
                 for name, rating in sorted(elo.items(), key=lambda item: -item[1])
@@ -426,7 +403,7 @@ def build(run_dir: Path, log: EventLog, rounds: int, delay: float, rng: random.R
         )
         beat()
 
-    best = max((name for name in elo if name != "reference"), key=lambda name: elo[name])
+    best = max(elo, key=lambda name: elo[name])
     log.emit(
         "run.finished",
         f"Run finished after {rounds} rounds. Best entrant: {best}.",
@@ -454,10 +431,10 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(
             {
                 "run_id": args.run_id,
-                "prompt": "a 90-second dub techno cue: sparse, hypnotic, wide dub chords, deep sub bass",
+                "prompt": "dub techno loop at 122: sparse, hypnotic, wide dub chords, deep sub bass",
                 "teams": len(TEAMS),
                 "rounds": args.rounds,
-                "reference": "reference.mid",
+                "bars": 16,
                 "created": "2026-07-26T12:00:00+00:00",
                 "synthetic": True,
             },

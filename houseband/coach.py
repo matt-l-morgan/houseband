@@ -343,7 +343,7 @@ def _format_producer_feedback(feedback: list[ProducerFeedback] | None) -> str:
     """Render producer feedback for the coach, or say plainly that there is none.
 
     Deliberately placed at the top of the prompt and labelled as outranking the
-    judges. Burying it below eight dimensions of rubric detail would let the
+    judges. Burying it below nine dimensions of rubric detail would let the
     volume of judge findings drown the one signal that actually says whether the
     output was useful.
 

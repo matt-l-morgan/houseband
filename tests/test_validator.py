@@ -1,9 +1,14 @@
 """Tests for the deterministic gate.
 
-This module exists because LLM judges cannot do these two jobs: they will not
-reliably notice a bass part an octave out of range, and they cannot compute
-n-gram overlap at all. So these tests are guarding the checks that the rest of
-the system deliberately does not ask a model to perform.
+This module exists because LLM judges cannot do this job: they will not reliably
+notice a bass part an octave out of its playable range, and asking them to check
+facts spends their attention there instead of on the music. So these tests guard
+the checks the rest of the system deliberately does not ask a model to perform.
+
+There used to be a third check here, melodic n-gram overlap against a reference
+recording, which stopped "meet the criteria" collapsing into "reproduce the
+reference". References were removed from the tool, so it had nothing left to
+compare against and went with them.
 """
 
 from __future__ import annotations
@@ -11,7 +16,6 @@ from __future__ import annotations
 from houseband.house import Score
 from houseband.validator import (
     check_imports,
-    check_originality,
     gate,
     playable_range,
     validate_score,
@@ -129,47 +133,18 @@ class TestValidation:
         assert any("section" in w.lower() for w in report.warnings)
 
 
-class TestOriginality:
-    def test_identical_material_is_rejected(self, tmp_path):
-        """Copying the reference must fail, or "meet the criteria" collapses
-        into "reproduce the reference"."""
-        midi, _ = _write(tmp_path, name="a.mid")
-        copy, _ = _write(tmp_path, name="b.mid")
-        report = check_originality(copy, [midi])
-        assert not report.ok
-        assert report.overlap_fraction > 0.5
-
-    def test_different_material_passes(self, tmp_path):
-        a, _ = _write(tmp_path, name="a.mid")
-
-        s = Score(bpm=140, key="F#")
-        s.mark_section("x", 0, 16)
-        lead = s.track("lead", patch="saw_lead")
-        for bar in range(16):
-            for i, beat in enumerate((1, 2.5, 3, 4.5)):
-                lead.note(bar, beat, 60 + ((bar * 7 + i * 5) % 24), 0.5, 80)
-        b = tmp_path / "b.mid"
-        s.write(str(b))
-
-        report = check_originality(b, [a])
-        assert report.ok, report.detail
-
-    def test_no_reference_is_not_a_failure(self, tmp_path):
-        midi, _ = _write(tmp_path)
-        assert check_originality(midi, []).ok
-
-
 class TestCombinedGate:
-    def test_gate_runs_both_checks(self, tmp_path):
+    def test_a_valid_score_passes(self, tmp_path):
         midi, sidecar = _write(tmp_path, name="cand.mid")
-        result = gate(midi, sidecar, reference_midis=[])
+        result = gate(midi, sidecar)
         assert result.ok
         assert result.validation.ok
 
-    def test_gate_skips_originality_when_invalid(self, tmp_path):
-        """No point comparing melodies in a file that does not even validate."""
+    def test_an_unreadable_file_is_rejected_rather_than_raising(self, tmp_path):
+        """The composer sees this text and gets a chance to fix it, so a crash
+        here would cost the turn instead of correcting it."""
         bad = tmp_path / "junk.mid"
         bad.write_bytes(b"nope")
-        result = gate(bad, None, reference_midis=[bad])
+        result = gate(bad, None)
         assert not result.ok
-        assert result.originality is None
+        assert result.feedback()

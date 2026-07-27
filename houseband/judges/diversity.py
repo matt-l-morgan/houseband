@@ -339,9 +339,8 @@ def select_varied(
     """Pick up to ``k`` candidate ids that are each decent and mutually distant.
 
     Quality is a floor, not the objective. ``min_quality`` is checked against
-    ``CandidateVerdict.weighted_total`` (which is mode-aware, so a starter is
-    measured on starter weights) and everything at or above it is treated as
-    equally eligible from then on. That is the whole point: past "a producer
+    ``CandidateVerdict.weighted_total``, and everything at or above it is treated
+    as equally eligible from then on. That is the whole point: past "a producer
     could use this", we have no basis for preferring a 7.4 to a 6.9 over the
     producer's own taste, and pretending we do is how the pool collapses.
 

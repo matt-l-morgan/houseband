@@ -25,13 +25,13 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from houseband import analyst, brief as brief_mod, coach as coach_mod, composer
+from houseband import brief as brief_mod, coach as coach_mod, composer
+from houseband import criteria as criteria_mod
 from houseband import config as cfg
 from houseband import render, score_text, validator
 from houseband.events import EventLog, Usage
 from houseband.types import (
     DIMENSIONS,
-    DIMENSIONS_FOR_MODE,
     ProducerFeedback,
     Brief,
     Candidate,
@@ -46,7 +46,7 @@ def new_run_id() -> str:
     return f"{stamp}-{random.randint(0x1000, 0xffff):04x}"
 
 
-def _held_out_dimension(run_id: str, mode: str = "longform") -> str:
+def _held_out_dimension(run_id: str) -> str:
     """Pick one dimension the coach never sees, deterministically per run.
 
     Agents optimise against whatever the coach tells them about, so holding a
@@ -55,8 +55,7 @@ def _held_out_dimension(run_id: str, mode: str = "longform") -> str:
     across runs stops any single dimension being permanently invisible to
     learning.
     """
-    dims = DIMENSIONS_FOR_MODE.get(mode, DIMENSIONS)
-    return dims[sum(ord(c) for c in run_id) % len(dims)]
+    return DIMENSIONS[sum(ord(c) for c in run_id) % len(DIMENSIONS)]
 
 
 def _relative_to(path: Path | None, root: Path) -> str | None:
@@ -104,50 +103,12 @@ def _producer_feedback_for(run_dir: Path, team: str, round_no: int) -> list[Prod
     return out
 
 
-def _resolve_reference(name: str | None, config: cfg.Config) -> Path | None:
-    if not name:
-        candidates = sorted(config.references_dir.glob("*.mid")) + sorted(
-            config.references_dir.glob("*.midi")
-        )
-        return candidates[0] if candidates else None
-    path = config.references_dir / name
-    return path if path.exists() else None
-
-
-def _build_reference_candidate(
-    reference_midi: Path, out_dir: Path, config: cfg.Config, log: EventLog
-) -> Candidate | None:
-    """Prepare the reference as an ordinary-looking candidate.
-
-    It has to be indistinguishable from an agent submission in the judged pool,
-    otherwise the calibration check measures nothing. Same artifacts, same
-    opaque id, no marker the judge can see.
-    """
-    try:
-        artifacts = render.render_all(
-            reference_midi, out_dir, stem="reference", config=config, title="candidate"
-        )
-        return Candidate(
-            candidate_id="ref",
-            team="reference",
-            midi_path=reference_midi,
-            piano_roll=artifacts.piano_roll,
-            audio=artifacts.audio,
-            score_text=score_text.render(reference_midi),
-            is_reference=True,
-        )
-    except Exception as exc:
-        log.warn(f"Could not prepare the reference candidate: {exc}")
-        return None
-
-
 def _strip_held_out(verdict: CandidateVerdict, held_out: str) -> CandidateVerdict:
     """A copy of the verdict with the held-out dimension removed."""
     return CandidateVerdict(
         candidate_id=verdict.candidate_id,
         team=verdict.team,
-        is_reference=verdict.is_reference,
-        dimensions=[d for d in verdict.dimensions if d.dimension != held_out],
+            dimensions=[d for d in verdict.dimensions if d.dimension != held_out],
     )
 
 
@@ -155,7 +116,6 @@ def run(
     prompt: str,
     teams: int = 3,
     rounds: int = 3,
-    reference: str | None = None,
     run_id: str | None = None,
     config: cfg.Config | None = None,
     client=None,
@@ -163,7 +123,6 @@ def run(
     max_turns: int | None = None,
     model: str | None = None,
     budget: int | None = None,
-    mode: str = "starter",
     bars: int | None = None,
 ) -> Path:
     """Execute a full run. Returns the run directory.
@@ -177,7 +136,7 @@ def run(
         config.model = model
     if budget:
         config.round_token_budget = budget
-    profile = cfg.profile_for(mode, bars)
+    profile = cfg.profile_for(bars)
     run_id = run_id or new_run_id()
     run_dir = config.runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -186,10 +145,10 @@ def run(
     # Imported here rather than at module scope so that a missing or broken judge
     # module surfaces as a run.failed event in the UI instead of an import error
     # nobody sees.
-    from houseband.judges import check_calibration, run_panel, tournament
-    from houseband.judges.elo import DEFAULT_RATING, REFERENCE_RATING
+    from houseband.judges import run_panel, tournament
+    from houseband.judges.elo import DEFAULT_RATING
 
-    held_out = _held_out_dimension(run_id, mode)
+    held_out = _held_out_dimension(run_id)
     team_names = list(composer.PERSONAS)[:teams] or ["conservatory"]
 
     log.emit(
@@ -201,7 +160,6 @@ def run(
         model=config.model,
         held_out_dimension=held_out,
         prompt=prompt,
-        mode=mode,
         bars=profile.bars,
     )
 
@@ -227,7 +185,6 @@ def run(
                 "rounds": rounds,
                 "model": config.model,
                 "held_out_dimension": held_out,
-                "mode": mode,
                 "bars": profile.bars,
                 "created": datetime.now(timezone.utc).isoformat(),
             },
@@ -238,29 +195,20 @@ def run(
     try:
         the_brief = brief_mod.build(prompt, client=client, config=config, log=log)
 
-        # -- reference and criteria, once for the whole run ------------------
-        reference_midi = _resolve_reference(reference, config)
-        reference_candidate: Candidate | None = None
-        criteria = ""
-        if reference_midi:
-            reference_candidate = _build_reference_candidate(
-                reference_midi, run_dir / "reference", config, log
-            )
-            criteria = analyst.derive_criteria(
-                reference_midi,
-                genre_hint=the_brief.genre,
-                client=client,
-                config=config,
-                log=log,
-                cache_path=config.references_dir / f"{reference_midi.stem}.criteria.md",
-                piano_roll=reference_candidate.piano_roll if reference_candidate else None,
-            )
-        else:
-            log.warn(
-                "No reference MIDI found in references/. Running without a "
-                "calibration anchor and with generic structural criteria."
-            )
-            criteria = analyst._fallback_criteria(the_brief.genre)
+        # -- criteria, once for the whole run --------------------------------
+        # Derived from the brief, deterministically. This used to come from an
+        # LLM analyst reading a reference recording, which meant the shared
+        # target every composer was briefed against could differ between two runs
+        # of the same prompt, and a rising score might be the criteria drifting
+        # rather than the music improving.
+        criteria = criteria_mod.for_brief(the_brief, profile)
+        log.emit(
+            "criteria.derived",
+            f"Structural criteria for {the_brief.genre or 'the brief'}: "
+            f"a {profile.bars}-bar loopable clip.",
+            genre=the_brief.genre,
+            bars=profile.bars,
+        )
         (run_dir / "criteria.md").write_text(criteria)
 
         state = {
@@ -276,8 +224,6 @@ def run(
             name: coach_mod.Playbook(name, config.playbooks_dir) for name in team_names
         }
         ratings: dict[str, float] = {name: DEFAULT_RATING for name in team_names}
-        if reference_candidate:
-            ratings["reference"] = REFERENCE_RATING
         findings_history: dict[str, list[Finding]] = {name: [] for name in team_names}
 
         for round_no in range(1, rounds + 1):
@@ -303,11 +249,9 @@ def run(
                     round=round_no,
                     client=client,
                     config=config,
-                    reference_midis=[reference_midi] if reference_midi else [],
                     max_turns=max_turns,
                     learned_helpers=coach_mod.approved_helpers(),
                     budget_remaining=budget_left // max(1, len(team_names)),
-                    mode=mode,
                     profile=profile,
                 )
                 # Render this team's audio now rather than after the whole round.
@@ -339,7 +283,7 @@ def run(
                                 result.sidecar_path,
                                 out_dir=round_dir / name / "daw",
                                 stem=f"{name}_r{round_no}",
-                                expect_bars=profile.bars or None,
+                                expect_bars=profile.bars,
                                 title=f"{name}, round {round_no}",
                                 brief=the_brief.prompt,
                             )
@@ -425,11 +369,7 @@ def run(
                     program=_relative_to(round_dir / result.team / "program.py", run_dir),
                 )
 
-                gate = validator.gate(
-                    candidate.midi_path,
-                    candidate.sidecar_path,
-                    [reference_midi] if reference_midi else None,
-                )
+                gate = validator.gate(candidate.midi_path, candidate.sidecar_path)
                 log.emit(
                     "gate.passed" if gate.ok else "gate.rejected",
                     gate.feedback()[:400],
@@ -439,13 +379,6 @@ def run(
                 )
 
             judged = list(candidates)
-            if reference_candidate:
-                # A fresh id each round for the same reason: the reference is
-                # re-judged alongside that round's candidates and its verdict
-                # belongs to that round's record.
-                reference_candidate.candidate_id = f"r{round_no}ref"
-                judged.append(reference_candidate)
-                id_to_team[reference_candidate.candidate_id] = "reference"
 
             # -- judge ------------------------------------------------------
             verdicts = run_panel(
@@ -456,24 +389,9 @@ def run(
                 config=config,
                 log=log,
                 round=round_no,
-                mode=mode,
             )
             for candidate_id, verdict in verdicts.items():
                 verdict.team = id_to_team.get(candidate_id, verdict.team)
-
-            # The cheapest check we have on whether the judges are worth
-            # listening to: a real recording sitting in the same blind pool
-            # should beat three agents on the structural dimensions. If it does
-            # not, the scores driving the learning loop are noise, and it is far
-            # better to know that now than to read three rounds of Elo as
-            # progress.
-            calibration = check_calibration(verdicts)
-            if not calibration.ok:
-                log.warn(
-                    "JUDGE CALIBRATION SUSPECT: " + calibration.summary(),
-                    round=round_no,
-                    calibration=calibration.model_dump(),
-                )
 
             # -- rank -------------------------------------------------------
             # The tournament works in blind candidate ids, so ratings have to be
@@ -484,8 +402,6 @@ def run(
                 candidate_id: ratings.get(id_to_team.get(candidate_id, ""), DEFAULT_RATING)
                 for candidate_id in (c.candidate_id for c in judged)
             }
-            if reference_candidate:
-                initial[reference_candidate.candidate_id] = REFERENCE_RATING
 
             new_ratings = tournament(
                 judged,
@@ -502,7 +418,7 @@ def run(
                 ratings[team] = rating
                 if team in state:
                     state[team].elo = rating
-            if mode == "starter" and len(candidates) > 1:
+            if len(candidates) > 1:
                 try:
                     from houseband.judges import diversity
 
@@ -645,7 +561,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", required=True, help="The song idea.")
     parser.add_argument("--teams", type=int, default=3)
     parser.add_argument("--rounds", type=int, default=3)
-    parser.add_argument("--reference", default=None, help="Filename in references/.")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--max-turns", type=int, default=None)
     parser.add_argument(
@@ -661,13 +576,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{cfg.Config().round_token_budget:,}). The run halts past budget x rounds.",
     )
     parser.add_argument(
-        "--mode",
-        default=cfg.DEFAULT_MODE,
-        choices=sorted(cfg.PROFILES),
-        help="starter (a loopable ~30s clip for a DAW) or longform (a whole piece).",
-    )
-    parser.add_argument(
-        "--bars", type=int, default=None, help="Override the starter bar count."
+        "--bars", type=int, default=None, help=f"Clip length in bars (default {cfg.SnippetProfile().bars})."
     )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
@@ -691,14 +600,12 @@ def main(argv: list[str] | None = None) -> int:
         prompt=args.prompt,
         teams=args.teams,
         rounds=args.rounds,
-        reference=args.reference,
         run_id=args.run_id,
         config=config,
         echo=not args.quiet,
         max_turns=args.max_turns,
         model=args.model,
         budget=args.budget,
-        mode=args.mode,
         bars=args.bars,
     )
     print(f"\nRun complete: {run_dir}")

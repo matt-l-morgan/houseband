@@ -1,56 +1,78 @@
 # houseband
 
-An agentic music composition loop: three composer teams write Python that emits MIDI, a panel of LLM judges critiques the result against anchored rubrics, and a coach turns that critique into durable improvements so the next round is better.
+An agentic loop that writes **loopable MIDI starter clips for producers**.
+Three composers each write a 16-bar idea as Python that emits MIDI, a panel of LLM judges critiques every take against anchored rubrics, you keep or bin the stems you actually want, and a coach turns both signals into durable instructions so the next round is better.
+
+Every take downloads as a DAW bundle: one combined MIDI file plus a separate file per stem, tempo map intact, ready to drag into Ableton, Logic or Pro Tools.
 
 **The interesting claim being tested is not "an LLM can write music."**
 It is that **agents can measurably improve at a creative task when given structured critique and a mechanism to absorb it.**
 
 That distinction shapes everything below.
 A system built to show that an LLM can produce music needs one good output.
-A system built to show that agents *improve* needs the improvement to be visible and falsifiable, which means it needs a critique signal specific enough to act on, a way for a lesson to persist past the round that produced it, and a check that the signal has not quietly become something the agents are gaming.
+A system built to show that agents *improve* needs the improvement to be visible and falsifiable, which means a critique signal specific enough to act on, a way for a lesson to persist past the round that produced it, and a check that the signal has not quietly become something the agents are gaming.
 Most of the machinery here exists for that third thing.
 
 You run it locally with your own Anthropic credential and watch the agents work in a browser.
 
+## Why clips
+
+A 16-bar loop is about 30 seconds at 128bpm, 22 at drum-and-bass tempo, 43 at 90.
+That is the unit a producer actually starts from, and the tool is built around it for three reasons.
+
+It is cheap enough to iterate on.
+Somebody auditioning ideas will not wait six minutes per take, and the whole point is running many rounds.
+
+It is judgeable.
+A four-minute arrangement gives a judge too many places to hide a vague opinion; sixteen bars forces every finding to name a bar.
+
+It is the honest deliverable.
+The output is a starting point, not a finished record, and a tool that pretends otherwise wastes the producer's time.
+
 ## Architecture
 
 ```
-user prompt ("epic long-form rock, building arrangement")
+user prompt ("dub techno loop at 124, room for a vocal")
       |
       v
- [analyst]  once per genre, offline
-      |     reads reference MIDI -> criteria.md (structural facts, no notes)
+ [brief]      prompt -> structured brief (genre, tempo hint, instrumentation)
+ [criteria]   brief  -> criteria.md, deterministic. No model call.
+      |
       v
- +----------------------------------------------------+
- |  ROUND N                                           |
- |                                                    |
- |  3 composer teams, in parallel                     |
- |    prompt = brief + criteria.md + own PLAYBOOK.md  |
- |    tools  = house library + render_midi()          |
- |         |                                          |
- |         v                                          |
- |    program.py -> out.mid                           |
- |         |                                          |
- |    +----+-----------------+                        |
- |    v                      v                        |
- |  parsed score        piano-roll PNG                |
- |  (text)              + fluidsynth audio            |
- |         |                                          |
- |         v                                          |
- |  VALIDATOR (deterministic, non-scoring)            |
- |    rejects unparseable / out-of-range / verbatim   |
- |    copying. A compiler check, not a judge.         |
- |         |                                          |
- |         v                                          |
- |  JUDGE PANEL (all LLM)                             |
- |    rubric judges  -> per-dimension findings        |
- |    pairwise judge -> Elo over candidates+reference |
- |         |                                          |
- |         v                                          |
- |  COACH                                             |
- |    findings -> playbook rules (routed by role)     |
- |    findings -> house library functions             |
- +----------------------------------------------------+
+ +--------------------------------------------------------+
+ |  ROUND N                                               |
+ |                                                        |
+ |  3 composers, in parallel                              |
+ |    prompt = brief + criteria.md + own PLAYBOOK.md      |
+ |    tools  = house library + render_midi()              |
+ |         |                                              |
+ |         v                                              |
+ |    program.py -> out.mid   (16 bars, must loop)        |
+ |         |                                              |
+ |    +----+-------------+----------------+               |
+ |    v                  v                v               |
+ |  parsed score   piano roll + audio  DAW bundle         |
+ |  (text)         (audition it now)   (combined + stems) |
+ |         |                                              |
+ |         v                                              |
+ |  VALIDATOR (deterministic, non-scoring)                |
+ |    rejects unparseable MIDI and out-of-range parts.    |
+ |    A compiler check, not a judge.                      |
+ |         |                                              |
+ |         v                                              |
+ |  JUDGE PANEL (all LLM)                                 |
+ |    rubric judges  -> per-dimension findings, each      |
+ |                      anchored to a bar range           |
+ |    pairwise judge -> Elo, both presentation orders      |
+ |         |                                              |
+ |         |        <---- YOU: keep / maybe / discard,    |
+ |         |              per stem, plus a note           |
+ |         v                                              |
+ |  COACH                                                 |
+ |    producer feedback  -> playbook rules  (outranks)    |
+ |    judge findings     -> playbook rules                |
+ |    recurring findings -> new house library functions   |
+ +--------------------------------------------------------+
       |
       v  repeat
 ```
@@ -62,125 +84,116 @@ The pipeline never talks to the UI; the UI is a pure reader of that file.
 
 ### Composers emit Python that writes MIDI
 
-Not raw MIDI bytes, and not a hand-designed JSON schema.
+Not raw MIDI bytes, and not JSON note lists.
 
-Raw MIDI requires hand-computed tick arithmetic, and models get it slightly wrong in ways that produce timing drift.
-A judge reads that drift as bad musicianship, and the coach then learns the wrong lesson from it: it starts writing playbook rules about rhythm to fix what was actually an arithmetic bug.
-Removing an entire class of misattributed feedback is worth a lot.
+Tick arithmetic is where a model makes silent errors that a human reading the output cannot see.
+The house library takes bar and beat, so a composer says `bar 4, beat 1` and the conversion to ticks and seconds happens once, in tested code.
 
-A JSON schema avoids the arithmetic but throws away the two things that make code the right choice.
-Loops make long-form structure cheap: sixteen bars of a developing arrangement is a `for` loop, not sixteen bars of transcription.
-And code is the only artifact where a judge's lesson can become a *reusable function*.
-When the panel keeps flagging mechanical timing, the coach can commit `humanize(track, feel="swing_58", vel_sigma=8)` to the shared library and every composer inherits the capability.
-With JSON, the same lesson can only ever be another sentence of advice that has to be re-read and re-applied every round.
+Loops make structure cheap.
+A four-bar figure restated with variation is three lines of Python and forty note events in JSON, and the version that is three lines is the version a model gets right.
 
-That is the difference between the learning loop operating in prompt space and operating in capability space, and it is why `houseband/house/learned.py` starts almost empty on purpose.
+And code is the only artifact where a judge's lesson can become a reusable capability.
+"Your hi-hats are rigidly quantised" can become a `swung_hats()` function that every later round calls.
+A lesson about a JSON blob has nowhere to live.
+
+### The criteria are deterministic, derived from the brief
+
+`houseband/criteria.py` turns the brief into the structural targets every composer is briefed against and every judge scores against.
+It is plain code with no model call, so the same prompt always produces the same criteria.
+
+This matters more than it looks.
+If the criteria can drift between runs, a rising score across rounds might be the target moving rather than the music improving, and the central claim becomes unfalsifiable.
+
+**This replaced a reference-recording mechanism, and the failure mode is worth recording.**
+Criteria used to be derived by an LLM analyst reading a MIDI transcription of a real song, which doubled as a pinned calibration anchor at the top of the Elo table.
+They were cached per reference file, and a run that asked for *no* reference silently adopted whichever file sorted first in `references/`.
+So a request for a house loop was briefed against a transcription of a six-minute rock song: every composer was told to build toward a climax in the final third, and the judges then marked the clips down for not having one.
+The anchor itself scored 1/10 on prompt adherence and 2/10 on loop usability, because it was a full arrangement being asked to be a 16-bar loop.
+Deriving criteria from the brief cannot drift that way, and it drops a feature that required every user to supply a copyrighted file the repo could never ship.
 
 ### All the judges are LLMs
 
-No DSP metric suite, no computed music-theory scoring.
+There is no DSP metric suite, deliberately.
 
-The upside is that the judge panel *is* a set of prompts.
-It can be edited, extended, or evolved at runtime, and the rubrics in `houseband/judges/rubrics/*.md` are plain markdown a user can rewrite without touching code.
-A hardcoded metric suite is a fixed opinion about what good music is, baked into Python.
+A metric that measures note-density variance is precise and measures the wrong thing.
+The reason to want language-based judges is that their criteria are *pliable*: adding "leave room for a vocal" is a paragraph in a rubric, not a new statistic and a new threshold to tune.
 
-The accepted costs are real: higher token spend, and noisier scores.
-The variance mitigations below are the price of this decision, not an afterthought.
-
-The two things that are *not* LLM-judged are the two that need arithmetic.
-`houseband/validator.py` checks that a bass line is in its instrument's playable range and computes melodic n-gram overlap against the reference.
-LLMs cannot reliably do either.
-The validator scores nothing: it is a compiler check that decides whether a submission is well-formed at all.
+The rubrics live in `houseband/judges/rubrics/*.md` as prose, loaded at runtime.
+Editing a judge means editing a markdown file.
 
 ### Rubric judges give feedback; a pairwise tournament gives the ranking
 
-These are deliberately separate jobs, because LLMs are much more consistent comparing two things than scoring one in isolation.
+Two different jobs, and one judge doing both does neither well.
 
-**Rubric judges produce actionable critique.**
-One call per dimension across eight dimensions, with structured output.
-Four properties carry nearly all the value:
+Absolute scores are actionable but drift: a model's idea of "7" moves between calls, and across rounds that drift is indistinguishable from progress.
+Pairwise comparison is stable but tells a composer nothing it can act on.
 
-- **Schema-required evidence anchors.** Every finding must name a bar range or a track.
-  This is the whole difference between actionable feedback and vibes.
-- **Anchored scales, not "rate 1 to 10."** Each level has an explicit descriptor: *Form: 2 = one section repeated with no variation; 4 = two sections, contrast is dynamic only; 6 = clear ABAB with distinct material; 8 = multi-section arc with a bridge and a reduced section.* A bare 1-10 scale is a vibe with a number attached.
-- **Role attribution on every finding.** Each finding names which of `songwriter`, `rhythm`, `arranger`, `mix` is responsible, so the lesson routes to that role's section of the playbook.
-  Without it every agent gets every critique and nobody sharpens.
-- **Blind and order-randomised.** Judges never learn which team produced which candidate, and the reference is indistinguishable from an agent's work.
+So the panel does both.
+Nine rubric dimensions produce findings that must cite a bar range and name a track, which is what the coach can turn into a rule.
+A pairwise tournament produces the ranking, and every pair is judged **in both presentation orders** with disagreement recorded as a draw, because position bias is real and a single-order verdict is exactly the biased signal the module exists to discard.
 
-**The pairwise judge produces the leaderboard.**
-Head-to-head preference with justification, fed into Elo.
-Three corrections for known LLM-judge failure modes:
+Elo here is zero-sum, so it ranks within a round and says little across them.
+The absolute measure is the weighted rubric total, whose anchors are written descriptors, so a 7 in round one means the same thing as a 7 in round five.
 
-- **Every pair runs in both presentation orders.** Position bias is real and large.
-  A split verdict counts as a draw.
-- **The reference's Elo is pinned** at a fixed anchor rating and never updates, so team ratings stay on an interpretable scale across rounds instead of drifting as a group.
-- **The reference is rubric-scored once and cached.** It never changes, so re-scoring it every round is pure spend.
+### The groove outranks the melody
 
-The leaderboard comes from the tournament; the coaching comes from the rubric.
-Conflating them would mean either a ranking built on noisy absolute scores or feedback that says only "you lost."
+The weights in `houseband/types.py` encode a product decision that looks wrong until you have watched someone audition clips.
 
-### The reference is a blind calibration anchor, never a similarity target
+`rhythm_groove` and `loop_usability` carry the most.
+A producer drops a clip on a timeline and nods or does not, within about two bars.
+A great progression over a stiff groove gets deleted; an ordinary progression over a groove that moves gets kept.
 
-A reference MIDI enters the candidate pool unlabelled and gets ranked alongside the agents' work.
+`melody` is weighted *below* harmony, on purpose.
+The producer supplies the topline.
+A fully-formed melody competes for the register and the attention a vocal needs, and is the first thing deleted.
 
-If agent output beats a real song on melody or form, the judge is miscalibrated, and you know that *before* building a learning loop on a broken signal.
-This is the cheapest judge-validation mechanism available: it costs one extra candidate per round and it is the difference between a run that means something and a run that produces a beautiful upward Elo chart while the music gets worse.
+`form_arrangement` is absent entirely.
+A 16-bar loop has one section by definition, so a clip would score 2 on a form rubric however good it was, and a composer reading that finding would be coached into adding an intro and an ending that ruin the thing which made it useful.
 
-The reference is used one other way: an analyst pass extracts *structural facts* into `criteria.md` (instrumentation tier count, presence of a bare section, climax position as a fraction of length, target duration).
-Composers see those facts and never the reference's notes.
+### Producer feedback outranks the judges
 
-**It is never used for similarity scoring, and that is not a preference.**
-Rewarding similarity makes plagiarism the optimal policy: if the score is "how close is this to the reference", the highest-scoring possible submission *is* the reference, and a competent optimiser finds that out fast.
-`validator.py::check_originality` makes the distinction enforceable rather than aspirational, rejecting any candidate that shares more than 12% of its melodic 8-gram windows with a reference.
-Intervals rather than absolute pitches, because transposing a lifted melody is the first thing anyone would try.
+The judges are a proxy for usefulness.
+You keeping or binning a stem *is* usefulness.
 
-See [`docs/references.md`](docs/references.md).
+So the coach prompt puts your feedback at the top, with deletion tallies across rounds, and says explicitly that it outranks the judges' findings.
+A pad you deleted twice running is a stronger signal than any rubric score.
+
+The per-stem part is the useful part.
+"This is a 6/10" teaches a composer nothing; "the kit is usable, the pad is mud" teaches it something specific.
+
+### Playbooks are per-composer, not per-role
+
+Each composer keeps its own `playbooks/<name>.md` with a provenance ledger, so a rule has to earn its slot: the ledger records which finding produced it and whether the score on that dimension actually moved afterwards.
+
+Sharing playbooks by role would leak lessons between competitors and destroy the comparison.
+The three personas are meant to diverge.
 
 ### Anti-Goodhart, built in from the start
 
-Agents will learn to game LLM judges.
-These are cheap, so they exist from round one rather than being retrofitted after a run turns out to have been measuring nothing.
+Agents optimise against whatever they are told about, so the system holds things back and cross-checks itself.
 
-- The blind reference anchor catches gross miscalibration.
-  `judges/calibration.py` turns it into an explicit gate: the reference must beat every agent on the three structural dimensions (form and arrangement, melody, harmony and voice leading), and a run that fails emits a `JUDGE CALIBRATION SUSPECT` event rather than burying the fact in a report.
-  Production and originality are excluded on purpose, because those are the two dimensions where an agent can legitimately win.
-- **One judge dimension is held out from the coach** each run, so it cannot be optimised against directly.
-  Which dimension rotates per run, so none is permanently invisible to learning.
-- **Median-of-3 sampling** on the dimensions that drive learning (form and arrangement, melody, rhythm and groove), because a single noisy score can teach the coach something untrue.
-- **The panel's own noise floor is measured and reported**, not assumed.
-  `ScoredDimension.spread` is the observed disagreement between samples of the same candidate, and the calibration report carries the mean across dimensions.
-  A dimension whose samples routinely disagree by three points cannot support a one-point conclusion, and that is exactly the number the coach needs before writing a rule.
-- Pairwise order-swapping removes the position-bias exploit.
-- The honest check no code can do for you: listen to the round 1 winner and the round 3 winner back to back and ask whether the improvement is *audible*, not just numeric.
-  If judge scores climb while your own preference stays flat, you are Goodharting and the run is not showing what you think it is.
+One **rotating held-out dimension** per run is never shown to the coach, giving an unpolluted read on whether the music improved or only the rubric compliance did.
+**Judge-variance re-scoring** reports `ScoredDimension.spread`, so a one-point gain inside a three-point spread is visibly not a result.
+**Diversity selection** (`houseband/judges/diversity.py`) picks a varied shortlist by farthest-point over score-derived descriptors rather than taking the Elo winner, because ideation wants several different ideas rather than one champion.
+And the **calibration gate** (`scripts/calibration_check.py`) scores a hand-written competent clip against a deliberately terrible one, blind, and fails loudly if the panel cannot separate them.
 
-### Playbooks are per-team, not per-role
-
-`playbooks/<team>.md`, with `attributed_role` organising rules into sections *within* the file.
-
-A role-keyed playbook shared across teams would leak team A's lessons to team B, which muddies the Elo separation the whole thing exists to demonstrate, and mixes contradictory style advice into one file.
-Findings route only to the team whose candidate produced them.
-
-Rules have to earn their slot: which rules were active for which score deltas is recorded, rules that do not correlate with gains get deprecated, and total playbook size is capped so the composer prompt does not bloat into uselessness.
+That last one is the gate everything else rests on.
+A learning loop built over a panel that cannot discriminate trains on noise, and it is far better to find that out from one script than after reading three rounds of noise as progress.
 
 ### Event-sourced, so the visualisation is nearly free
 
-Every stage appends a typed Pydantic event to `runs/<id>/events.jsonl`.
-`POST /api/runs` launches the pipeline as a detached child process; `GET /api/runs/<id>/events` replays and then tails the log over SSE.
+Every stage appends one typed event to `runs/<id>/events.jsonl`.
+The server replays that file and then tails it over SSE; the browser is a pure reader.
 
-The server never imports the pipeline.
-That separation buys three things: the CLI works fully headless and the log is the complete record of a run, any past run replays identically, and a composer that crashes the pipeline cannot take the UI down.
-A page reload costs "replay from `from_seq`, then tail", because the log is append-only.
-
-**Every LLM event carries the response `usage` block**, so the UI shows a running token total.
-That is a trust feature when users are spending their own key, and the per-round budget guard needs the same numbers to halt a runaway round.
+This is why a composer that crashes the pipeline cannot take the UI down, why the server can restart mid-run without losing an event, and why a page can attach to a run that some other terminal started.
+Credential scrubbing is enforced in the writer rather than at the call sites, because `events.jsonl` is exactly the file someone attaches to a bug report.
 
 ## Quickstart
 
 Requires Python 3.11+ and about 40MB of download for the soundfont.
 
 ```bash
-git clone https://github.com/mattmorgan/houseband.git
+git clone https://github.com/matt-l-morgan/houseband.git
 cd houseband
 
 # Creates .venv, installs dependencies, checks for FluidSynth, fetches a
@@ -189,7 +202,7 @@ bash scripts/setup.sh
 ```
 
 `scripts/setup.sh` is idempotent and safe to re-run.
-It will stop and tell you what to install if FluidSynth is missing, rather than installing system packages on your machine uninvited:
+It stops and tells you what to install if FluidSynth is missing, rather than installing system packages on your machine uninvited:
 
 ```bash
 brew install fluid-synth          # macOS
@@ -212,7 +225,8 @@ export ANTHROPIC_API_KEY=sk-ant-...
 PYTHONPATH=. .venv/bin/python -m houseband.server
 ```
 
-Open <http://127.0.0.1:8000>, enter a prompt, pick a reference and a number of rounds, and watch the board fill in.
+Open <http://127.0.0.1:8000>, type a prompt, pick a clip length and a number of rounds, and watch the board fill in.
+As each composer finishes you can play its clip immediately, rate it stem by stem, read what the judges said, and download the DAW bundle.
 
 `PYTHONPATH=.` is how this repo runs, on purpose.
 `render.py` hands the same path to the subprocess that executes a composer's program, so it has to work whether or not anyone ran `pip install -e .`.
@@ -224,10 +238,12 @@ The pipeline runs standalone and the event log is the complete record:
 
 ```bash
 PYTHONPATH=. .venv/bin/python -m houseband.loop \
-    --prompt "epic long-form rock, building arrangement" \
-    --teams 3 --rounds 3 \
-    --reference my_reference.mid
+    --prompt "dub techno loop at 124, sparse, room for a vocal" \
+    --teams 3 --rounds 3 --bars 16
 ```
+
+`--bars` accepts 8, 16 or 32.
+Those are the lengths the rubrics and the DAW-readiness check are written against; an arbitrary bar count produces a clip that does not loop on a four-bar phrase boundary, and the loop-usability judge would mark the composer down for our arithmetic.
 
 ### Verify the render path without spending anything
 
@@ -245,7 +261,19 @@ print(a.audio, a.piano_roll)
 ```
 
 `examples/good_program.py` and `examples/bad_program.py` are the hand-written judge calibration pair.
-If the panel cannot rank the good one decisively above the bad one, the rubrics are broken and no amount of agent work will fix it.
+If the panel cannot rank the good one decisively above the bad one, the rubrics are broken and no amount of agent work will fix it:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/calibration_check.py
+```
+
+### Work on the UI without spending anything
+
+`scripts/synthetic_run.py` writes a complete, plausible event log with no API calls, so the whole board can be developed and demoed offline:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/synthetic_run.py --run-id synthetic
+```
 
 ## Credentials
 
@@ -279,7 +307,6 @@ It reaches the pipeline through the child process environment, and is forgotten 
 A program that goes looking for a key finds nothing.
 
 As a backstop, `events.py::scrub` runs over every event payload before it is written, redacting sensitive key names wholesale and pattern-matching key-shaped strings anywhere in the payload.
-`runs/<id>/events.jsonl` is exactly the file someone attaches to a bug report, so a leak there would not be a recoverable mistake.
 The guarantee is tested against the bytes on disk rather than asserted: `tests/test_events.py::test_message_and_data_are_both_scrubbed` and `tests/test_integration.py::test_no_key_material_reaches_the_log`.
 
 ## Docker
@@ -301,7 +328,6 @@ It ends the build by actually rendering `examples/good_program.py` inside the im
 Supply one with `-e ANTHROPIC_API_KEY=...` or leave it unset and paste one into the UI.
 
 Mounting `runs/` is optional but recommended, otherwise every artifact from a run disappears with the container.
-Mount `references/` too if you want your own reference MIDI available.
 
 Before deploying anywhere other than your own machine, read [`docs/security.md`](docs/security.md).
 The short version: run it single-user, and do not expose an instance publicly with your own key configured.
@@ -311,26 +337,31 @@ The short version: run it single-user, and do not expose an instance publicly wi
 ```
 runs/<id>/
   events.jsonl          the complete record; everything else is derived
-  meta.json             prompt, teams, rounds, held-out dimension
-  criteria.md           structural facts the analyst derived from the reference
-  reference/            the reference's own rendered artifacts
+  request.json          prompt, composers, rounds, clip length, model, budget
+  meta.json             held-out dimension and run settings
+  criteria.md           the structural targets every composer was briefed against
+  feedback.jsonl        your keep/discard verdicts, append-only
   staged/               library functions the coach proposed, awaiting approval
+  exports/              DAW bundles, built on request
   round1/
     artifacts/
-      c1.oga            audio, by blind candidate id (format depends on your
-      c1.png            FluidSynth build; .oga where Vorbis is available)
+      r1c1.oga          audio, by blind candidate id (format depends on your
+      r1c1.png          FluidSynth build; .oga where Vorbis is available)
       ...
-    <team>/             the composer's scratch dir: program.py, out.mid, and
-                        every revision it accepted along the way
+    <composer>/         its scratch dir: program.py, out.mid, every revision it
+                        accepted along the way, and daw/ with the bundle
     verdicts.json       per-dimension findings with bar anchors, plus ratings
-    composers.json      turns, render attempts, and token usage per team
+    composers.json      turns, render attempts, and token usage per composer
   round2/ ...
-playbooks/<team>.md     what the coach taught, and why
+playbooks/<name>.md     what the coach taught each composer, and why
 houseband/house/learned.py   capabilities the coach added
 ```
 
-Candidates are named `c1`, `c2` in the artifacts directory rather than by team, because judges must be blind to which team produced which piece.
+Candidates are named `r1c1`, `r1c2` in the artifacts directory rather than by composer, because judges must be blind to which one produced which clip.
 `verdicts.json` holds the `id_to_team` mapping for after the fact.
+
+The event log records a finding *count* rather than the finding text, because one round of full findings runs over 100KB and the log is replayed in full on every page load.
+`verdicts.json` is the authoritative record of what the judges said, and the server merges it into the API when you open a take's findings.
 
 ## Limitations
 
@@ -339,19 +370,12 @@ Stated plainly, because the point of the project is a falsifiable claim and a RE
 **The audio will not sound like a produced record.**
 Rendering is FluidSynth plus a General MIDI soundfont.
 Even with a good modern bank, GM is single-dynamic samples with no articulation, no amp modelling and no mixing, so a "distorted guitar" is a static sampled waveform rather than an instrument being played.
-Judge the composition, the arrangement and the form; do not judge the production, which is a property of the renderer and not of the agents.
-This is also why audio is a deliverable rather than a judged artifact: with a bare GM bank every candidate sounds equally like a GM bank, so a listening judge has almost no signal to discriminate on.
+The audio exists so you can audition an idea in two seconds; the deliverable is the MIDI.
+Judge the composition and the groove, not the production, which is a property of the renderer and not of the agents.
 See [`docs/soundfonts.md`](docs/soundfonts.md).
 
-**The repo ships no useful references, and cannot.**
-The flow that motivates the whole reference mechanism -- drop in a MIDI of a song you love, see whether the agents reach its structural bar -- works locally and is not distributable.
-Community transcriptions of copyrighted songs are derivative works, so the repo ships only an empty `references/` directory.
-Public-domain rock is thin, so what is legitimately available is overwhelmingly classical and folk, which calibrates form and melody usefully and groove and production badly.
-That is a real limitation of the distributed version, not an oversight.
-See [`docs/references.md`](docs/references.md).
-
 **LLM judges are noisy, and the system mitigates that rather than eliminating it.**
-Median-of-3 sampling, both-order pairwise comparison, the pinned reference anchor and the calibration gate all reduce the noise floor or make it visible.
+Median-of-3 sampling on the highest-weighted dimensions, both-order pairwise comparison, and the calibration gate all reduce the noise floor or make it visible.
 None of them removes it.
 `ScoredDimension.spread` reports the observed spread precisely so you can see how much of a round-over-round gain is real, and a one-point improvement inside a three-point spread is not a result.
 
@@ -362,12 +386,12 @@ The container is the real isolation boundary for anything deployed.
 Read [`docs/security.md`](docs/security.md) before you run this anywhere that matters.
 
 **A round costs real money on your key.**
-Eight rubric dimensions with median-of-3 on three of them, twelve pairwise calls, three composer agents at high effort, per round.
-The UI shows a running token total and `config.round_token_budget` (default 400,000 output tokens) halts a runaway round, but there is no cost estimate before you press start.
+Nine rubric dimensions with median-of-3 on three of them, a both-orders pairwise tournament, and three composers at high effort, per round.
+The UI prices the token allowance in dollars before you press start, and `config.round_token_budget` (default 400,000 output tokens) halts a runaway round.
 
 **Three rounds is not evidence of a trend.**
 The demo is built to make improvement *visible*, not to establish it statistically.
-A single run with three rounds and three teams can show the loop working; it cannot distinguish a real learning effect from a lucky sample.
+A single run with three rounds and three composers can show the loop working; it cannot distinguish a real learning effect from a lucky sample.
 
 ## Anthropic-only today
 
@@ -376,14 +400,16 @@ houseband is Anthropic-only.
 
 The seam is deliberately small.
 Model id and effort live in `houseband/config.py` (`DEFAULT_MODEL`, `COMPOSER_EFFORT`, `JUDGE_EFFORT`, `COMPOSER_MAX_TOKENS`, `JUDGE_MAX_TOKENS`) and are never hardcoded at a call site, so swapping models is a one-line change.
+The model is also selectable per run in the UI, with per-million-token rates shown, because the choice belongs to whoever is paying.
+
 The provider boundary itself is four places, each importing `anthropic` locally rather than at module scope:
 
 - `houseband/composer.py` -- a hand-written tool loop over `messages.stream`, with one tool, `render_midi`
 - `houseband/judges/` -- `messages.parse()` with Pydantic schemas, no tools
 - `houseband/coach.py` -- the same
-- `houseband/brief.py` and `houseband/analyst.py` -- one-shot structured calls
+- `houseband/brief.py` -- one structured call per run
 
-What a second provider would actually have to supply: streaming with a large `max_tokens`, tool use, and structured output against a JSON Schema.
+What a second provider would have to supply: streaming with a large `max_tokens`, tool use, and structured output against a JSON Schema.
 The last is the constraint that matters, and it is why `houseband/types.py` avoids tuples in its schemas.
 Prompt caching is used but not depended on.
 
@@ -391,30 +417,34 @@ Prompt caching is used but not depended on.
 
 ```
 houseband/
-  config.py            soundfont discovery, model settings, credential source
+  config.py            soundfont discovery, model settings, clip profile
   events.py            Pydantic event schemas + JSONL writer, with key scrubbing
   types.py             the contracts between composers, judges, and the coach
+  timing.py            bar/beat <-> seconds, with a tempo map
   house/               the library composers write against
     core.py            Score, tracks, sections, chords, bar/beat musical time
     learned.py         functions the coach added. Starts almost empty on purpose.
   brief.py             prompt -> structured brief
-  analyst.py           reference MIDI -> criteria.md
+  criteria.py          brief -> criteria.md, deterministic
   composer.py          the agent loop; one tool, render_midi(code)
   render.py            program.py -> MIDI -> audio + piano roll
+  export.py            MIDI -> DAW bundle: combined file plus one per stem
   score_text.py        MIDI -> compact judge-readable score text
-  validator.py         the deterministic gate: imports, ranges, originality
-  judges/              rubric panel + pairwise tournament, rubrics as markdown
-  coach.py             findings -> playbook rules + staged library functions
+  validator.py         the deterministic gate: imports and playable ranges
+  judges/              rubric panel, pairwise tournament, Elo, diversity
+  coach.py             findings + producer feedback -> playbook rules
   loop.py              round orchestration, events, per-round budget guard
-  server.py            FastAPI: launch a run, tail its events over SSE
-web/index.html         single-page live board. No build step.
+  server.py            FastAPI: launch a run, tail its events, take feedback
+web/index.html         single-page live board. No build step, no CDN.
 examples/              the hand-written judge calibration pair
 scripts/
   setup.sh             fresh clone -> verified working render
   fetch_soundfont.py   install a GM bank, print its license
+  calibration_check.py does the judge panel actually discriminate?
+  report_run.py        round-over-round scores from a finished run
+  synthetic_run.py     a fake run, for working on the UI without spending
 docs/
   soundfonts.md        options and their verified licenses
-  references.md        what can and cannot be distributed, and why
   security.md          executing generated code: mitigations and their limits
 ```
 
@@ -425,10 +455,13 @@ docs/
 .venv/bin/python -m pytest
 ```
 
+Runs in parallel through pytest-xdist; `-n auto` is already in `pyproject.toml`.
+No test needs a credential: every agent entry point takes an injected client, so the suite drives the real prompt construction and error paths against stubs.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
 
 Soundfonts are fetched, not committed, and carry their own licenses.
-Both banks `scripts/fetch_soundfont.py` can install are MIT, verified from primary sources; the script prints the license text it fetched before it exits, so you are never surprised about what you installed.
+Both banks `scripts/fetch_soundfont.py` can install are MIT, verified from primary sources, and the script prints the license text it fetched before it exits, so you are never surprised about what you installed.
 See [`docs/soundfonts.md`](docs/soundfonts.md).

@@ -168,9 +168,9 @@ def load_view(midi_path: Path, sidecar_path: Path | None = None) -> ScoreView:
     def _pan_from_cc(inst) -> float:
         """Recover pan from CC10 when no sidecar records it.
 
-        Without this, any MIDI we did not write ourselves (every reference piece)
+        Without this, any MIDI we did not write ourselves
         is reported to the judges as entirely centre-panned. That is a false claim
-        about the mix, and it costs the reference marks on orchestration and
+        about the mix, and it costs that file marks on orchestration and
         production for a stereo image it actually has.
         """
         values = [cc.value for cc in inst.control_changes if cc.number == 10]

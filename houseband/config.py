@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # later, providers) is a one-line change instead of a grep.
 #
 # Sonnet 5 is the default because a run makes a lot of calls: three composers
-# iterating, then eight rubric dimensions per candidate with three of them
+# iterating, then nine rubric dimensions per candidate with three of them
 # sampled three times, then a both-orders pairwise tournament, then coaching. At
 # Opus 5 rates ($5/$25 per MTok against Sonnet 5's $3/$15) a three-round run gets
 # expensive enough to discourage the repeated runs this system is supposed to
@@ -52,7 +52,13 @@ JUDGE_MAX_TOKENS = 16_000
 # Judge dimensions that drive the learning loop get sampled repeatedly and the
 # median taken, because a single LLM score is noisy enough to teach the coach
 # something untrue.
-MEDIAN_SAMPLED_DIMENSIONS = ("form_arrangement", "melody", "rhythm_groove")
+#
+# These are the two highest-weighted dimensions plus melody. Groove and loop
+# usability decide whether a producer keeps the clip, so noise there is the most
+# expensive kind: it is what the coach writes rules about. This list previously
+# named form_arrangement, which no longer exists as a dimension, so the sampling
+# was silently applying to one dimension instead of three.
+MEDIAN_SAMPLED_DIMENSIONS = ("rhythm_groove", "loop_usability", "melody")
 MEDIAN_SAMPLES = 3
 
 
@@ -151,85 +157,71 @@ def credential_source() -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Mode profiles
+# The snippet profile
 # ---------------------------------------------------------------------------
 
-# Two deliverables, two sets of settings.
+# This tool makes one thing: a short loopable clip a producer imports into a DAW
+# and builds on. Sixteen bars of 4/4 is about 30 seconds at 128bpm, 22 at
+# drum-and-bass tempo and 43 at 90, so bar count is the knob rather than seconds.
+# Bars are what a composer and a DAW both think in, and pinning seconds would
+# force awkward tempos.
 #
-# "starter" is the one producers actually asked for: roughly half a minute of
-# loopable material to drag into Ableton and build on. Sixteen bars of 4/4 lands
-# between 22s (at 174bpm drum and bass) and 42s (at 90bpm), so bar count is the
-# knob rather than seconds -- bars are what a composer and a DAW both think in,
-# and pinning seconds would force awkward tempos.
-#
-# Speed is a feature here in a way it is not for long-form. Someone auditioning
-# ideas will not wait six minutes per take, so effort drops to medium and turns
-# are capped at three. That is a real trade: fewer turns means fewer chances to
-# apply a playbook rule, so starter mode learns more slowly per round and makes up
-# for it by making rounds cheap enough to run many.
+# Speed is a feature. Someone auditioning ideas will not wait six minutes per
+# take, so effort is medium and turns are capped low. That is a real trade: fewer
+# turns means fewer chances to apply a playbook rule, so the loop learns more
+# slowly per round and makes up for it by making rounds cheap enough to run many.
+
+# The tempi used to quote a clip's length as seconds. Drum and bass sits near 174
+# and boom-bap near 90, which brackets nearly everything anyone asks for, so one
+# figure would be wrong for most genres. Kept here rather than inline so the
+# composer prompt, the UI picker and the docs all quote the same range. Public
+# because the server reads them to label the clip-length picker.
+TEMPO_FAST = 174
+TEMPO_SLOW = 90
+
 
 @dataclass(frozen=True)
-class ModeProfile:
-    """Everything that differs between a starter and a long-form piece."""
+class SnippetProfile:
+    """How long a clip is, and how much thinking to spend getting there."""
 
-    name: str
-    bars: int
-    effort: str
-    max_turns: int
-    max_tokens: int
-    approx_seconds: str
-    length_instruction: str
+    bars: int = 16
+    effort: str = "medium"
+    max_turns: int = 3
+    # Thinking counts against this and a truncated turn costs a whole retry, so
+    # there is deliberate headroom above what the program itself needs.
+    max_tokens: int = 48_000
 
     def target_seconds(self, bpm: float, beats_per_bar: int = 4) -> float:
         """How long ``bars`` actually runs at a given tempo."""
         return self.bars * beats_per_bar * 60.0 / bpm if bpm else 0.0
 
+    @property
+    def approx_seconds(self) -> str:
+        return (
+            f"about {self.target_seconds(TEMPO_FAST):.0f} to "
+            f"{self.target_seconds(TEMPO_SLOW):.0f} seconds depending on tempo"
+        )
 
-STARTER_PROFILE = ModeProfile(
-    name="starter",
-    bars=16,
-    effort="medium",
-    max_turns=3,
-    # Still generous: thinking counts against this, and a truncated turn costs a
-    # whole retry. Lower than long-form because the program itself is shorter.
-    max_tokens=48_000,
-    approx_seconds="about 20 to 45 seconds depending on tempo",
-    length_instruction=(
-        "Write exactly {bars} bars. The material must loop: bar {last} has to lead "
-        "back into bar 0 without a seam, and nothing may sound past the end of bar "
-        "{last} except a short release tail."
-    ),
-)
-
-LONGFORM_PROFILE = ModeProfile(
-    name="longform",
-    bars=0,  # 0 means "as long as the brief implies"
-    effort=COMPOSER_EFFORT,
-    max_turns=8,
-    max_tokens=COMPOSER_MAX_TOKENS,
-    approx_seconds="whatever the brief asks for",
-    length_instruction=(
-        "Write a complete piece at the length the brief asks for, with a beginning, "
-        "a developed middle and an ending."
-    ),
-)
-
-PROFILES: dict[str, ModeProfile] = {
-    "starter": STARTER_PROFILE,
-    "longform": LONGFORM_PROFILE,
-}
-
-DEFAULT_MODE = "starter"
+    def length_instruction(self) -> str:
+        return (
+            f"Write exactly {self.bars} bars. The material must loop: bar "
+            f"{self.bars - 1} has to lead back into bar 0 without a seam, and "
+            f"nothing may sound past the end of bar {self.bars - 1} except a short "
+            "release tail."
+            # Named as a consequence of the tempo the composer chooses, not as a
+            # second target. Stating a seconds figure as a goal invites padding
+            # the bar count or slowing the tempo to hit it, and the bar count is
+            # the thing the DAW grid and the loop points actually depend on.
+            f"\n\nAt {TEMPO_FAST} that runs about "
+            f"{self.target_seconds(TEMPO_FAST):.0f} seconds, and at "
+            f"{TEMPO_SLOW} about {self.target_seconds(TEMPO_SLOW):.0f}. "
+            "Choose the tempo the music wants; the bar count is what is fixed."
+        )
 
 
-def profile_for(mode: str, bars: int | None = None) -> ModeProfile:
-    """Resolve a mode to its profile, optionally overriding the bar count."""
-    base = PROFILES.get(mode, STARTER_PROFILE)
-    if bars and bars != base.bars:
-        from dataclasses import replace
-
-        return replace(base, bars=bars)
-    return base
+def profile_for(bars: int | None = None) -> SnippetProfile:
+    """The snippet profile, optionally with a different bar count."""
+    return SnippetProfile(bars=bars) if bars else SnippetProfile()
 
 
 @dataclass
@@ -241,7 +233,6 @@ class Config:
     fluidsynth: str | None = field(default_factory=lambda: shutil.which("fluidsynth"))
 
     runs_dir: Path = field(default_factory=lambda: REPO_ROOT / "runs")
-    references_dir: Path = field(default_factory=lambda: REPO_ROOT / "references")
     playbooks_dir: Path = field(default_factory=lambda: REPO_ROOT / "playbooks")
 
     # Per-round output-token ceiling. A runaway composer loop is the realistic

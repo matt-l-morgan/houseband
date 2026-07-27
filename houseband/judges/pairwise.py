@@ -239,14 +239,22 @@ def compare(
         reason=" ".join([note, *reasons]).strip(),
     )
     if log is not None:
+        # winner stays slot-relative because that is what _outcome consumes to
+        # move the Elo ratings. winner_id is the same result named, for anything
+        # reading the log: "r1c2 vs r1ref -> B" is unreadable next to the
+        # per-order events, which name candidates directly.
+        winner_id = (
+            None if winner == "tie" else (a.candidate_id if winner == "A" else b.candidate_id)
+        )
         log.emit(
             "pairwise.verdict",
-            f"{a.candidate_id} vs {b.candidate_id}: {reconciled.winner}",
+            f"{a.candidate_id} vs {b.candidate_id}: {winner_id or 'draw'}",
             round=round,
             order="both",
             a=a.candidate_id,
             b=b.candidate_id,
             winner=reconciled.winner,
+            winner_id=winner_id,
             agreed=winner != "tie",
             reason=reconciled.reason,
         )
@@ -315,8 +323,7 @@ def tournament(
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results.extend(pool.map(one, pairs[1:]))
 
-    pinned = {c.candidate_id for c in candidates if c.is_reference}
-    ratings = elo.run_ratings(results, pinned=pinned, initial=initial, k=k)
+    ratings = elo.run_ratings(results, initial=initial, k=k)
 
     if log is not None:
         by_id = {c.candidate_id: c for c in candidates}
@@ -329,7 +336,6 @@ def tournament(
                 team=candidate.team if candidate else None,
                 candidate_id=candidate_id,
                 elo=_one_decimal(rating),
-                pinned=candidate_id in pinned,
                 comparisons=sum(1 for a, b, _ in results if candidate_id in (a, b)),
             )
     return ratings
